@@ -1,0 +1,141 @@
+{
+  "project_name": "Multi-Tenant SaaS Restaurant Billing POS System",
+  "app_archetype": "desktop_like_saas_app",
+  "design_language": "Flutter Windows Desktop (Material 3 / Fluent Desktop Fusion)",
+  "emotional_tone": "High-Efficiency Tactical Precision, Ultrafast POS Workflow, Command Center Clarity",
+  "theme_strategy": {
+    "default_mode": "dark",
+    "background_base": "bg-slate-950",
+    "surface_container_low": "bg-slate-900/90",
+    "surface_container_medium": "bg-slate-900",
+    "surface_container_high": "bg-slate-800/80",
+    "surface_container_highest": "bg-slate-800",
+    "border_color": "border-slate-800",
+    "border_highlight": "border-teal-500/40"
+  },
+  "typography": {
+    "font_family_heading": "'Plus Jakarta Sans', 'Outfit', sans-serif",
+    "font_family_body": "'Inter', -apple-system, sans-serif",
+    "font_family_mono": "'JetBrains Mono', 'Fira Code', monospace",
+    "head_style": "font-bold tracking-tight text-slate-100",
+    "body_style": "text-slate-300 antialiased",
+    "mono_price_style": "font-mono font-bold tracking-wider text-emerald-400",
+    "text_sizes": {
+      "pos_total": "text-3xl font-mono font-extrabold tracking-tight text-teal-400",
+      "window_title": "text-xs font-semibold uppercase tracking-widest text-slate-400",
+      "h1": "text-2xl font-bold tracking-tight text-white",
+      "h2": "text-xl font-bold tracking-tight text-slate-100",
+      "h3": "text-lg font-semibold text-slate-200",
+      "card_title": "text-sm font-semibold text-slate-100",
+      "badge": "text-xs font-bold tracking-wide uppercase"
+    }
+  },
+  "colors": {
+    "primary": {
+      "main": "#0D9488",
+      "hover": "#0F766E",
+      "active": "#115E59",
+      "light": "#2DD4BF",
+      "contrast_text": "#FFFFFF"
+    },
+    "accent_brand": {
+      "swiggy": "#FC8019",
+      "zomato": "#CB202D",
+      "urbanpiper": "#00A86B",
+      "razorpay": "#0C2340",
+      "upi_qr": "#16A34A"
+    },
+    "status": {
+      "dine_in": "bg-indigo-500/10 text-indigo-400 border-indigo-500/30",
+      "takeaway": "bg-amber-500/10 text-amber-400 border-amber-500/30",
+      "online_swiggy": "bg-orange-500/10 text-orange-400 border-orange-500/30",
+      "online_zomato": "bg-rose-500/10 text-rose-400 border-rose-500/30",
+      "in_stock": "bg-emerald-500/10 text-emerald-400 border-emerald-500/30",
+      "out_of_stock": "bg-rose-500/10 text-rose-400 border-rose-500/30"
+    },
+    "surface": {
+      "window_header": "bg-slate-950 border-b border-slate-800/80 text-slate-300",
+      "sidebar": "bg-slate-900 border-r border-slate-800 text-slate-300",
+      "cart_panel": "bg-slate-900/95 border-l border-slate-800 text-slate-100",
+      "modal_overlay": "bg-slate-950/80 backdrop-blur-md"
+    }
+  },
+  "window_chrome_header": {
+    "spec": "Top 40px fixed header styled like Windows Desktop app chrome (Fluent/Material 3 hybrid). Contains: App Logo/Tenant Name, Store Selector dropdown, Live Websocket/UrbanPiper Status pill with green/red indicator light, Quick Audio Alert Mute/Unmute toggle, System Clock, and Windows-style action controls (Minimize, Maximize, Close icons).",
+    "height": "h-10",
+    "background": "bg-slate-950 border-b border-slate-800/80"
+  },
+  "layout_specs": {
+    "app_shell": "h-screen w-screen flex flex-col overflow-hidden bg-slate-950 text-slate-100 font-sans select-none",
+    "main_content": "flex-1 flex overflow-hidden relative",
+    "sidebar_nav": "w-64 bg-slate-900 border-r border-slate-800 flex flex-col justify-between p-3 select-none",
+    "pos_billing_grid": "flex-1 flex overflow-hidden",
+    "pos_menu_section": "flex-1 flex flex-col overflow-hidden p-4 space-y-3 bg-slate-950",
+    "pos_cart_section": "w-[400px] xl:w-[440px] bg-slate-900 border-l border-slate-800 flex flex-col justify-between p-4 shadow-2xl"
+  },
+  "key_features_design": {
+    "store_login": {
+      "layout": "Centered dark glassmorphic card with Windows acrylic backdrop feel",
+      "components": "Tenant select, username, password, quick PIN login option, multi-store login indicator"
+    },
+    "pos_billing": {
+      "layout": "2-column split (Menu Grid on Left, Live Cart & Checkout on Right)",
+      "search_bar": "Sticky top input with shortcut key indicator [Ctrl + /] or [F3], fast category tabs bar",
+      "item_card": "Compact rectangular cards with sharp crisp borders, price in green mono font, add button with hover lift effect, out of stock overlay option",
+      "cart_panel": "Header with Order Type selector (Dine-In, Takeaway, Delivery), scrollable item list with +/- count steppers, special instructions notes field, Bill breakdown (Subtotal, Tax/GST 5%, Discount, Rounding, Grand Total), payment action buttons."
+    },
+    "integrated_payment_modal": {
+      "modes": ["Cash", "Card (EDC)", "UPI (Live Dynamic QR)"],
+      "upi_qr_spec": "Scannable Razorpay/PhonePe UPI QR code rendered via canvas/SVG with animated scannable line beam, timer countdown, auto-polling payment status bar with simulated success trigger",
+      "cash_calculator": "Preset tender buttons (₹100, ₹500, ₹2000, Exact), calculated change due output in large bold green mono typography"
+    },
+    "online_orders": {
+      "cards": "Kanban style columns (Pending, Preparing, Ready, Dispatched) or dense order list with Swiggy/Zomato branded badges, timer ago tag, auto-accept toggle switch, sound alert audio synth indicator",
+      "auto_accept": "Sticky top bar indicator showing UrbanPiper webhook connection status & auto-accept state"
+    },
+    "menu_stock_manager": {
+      "table": "Dense data grid with thumbnail, item name, category badge, price, tax rate, fast 1-click In-Stock / Out-of-Stock switch (green/red active glow switch)"
+    },
+    "thermal_receipt_kot": {
+      "modal": "Interactive 80mm thermal receipt preview and KOT (Kitchen Order Ticket) preview side-by-side with browser print trigger"
+    }
+  },
+  "image_urls": {
+    "food_items": [
+      {
+        "name": "Chicken Biryani",
+        "url": "https://images.unsplash.com/photo-1727404679933-99daa2a7573a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NzV8MHwxfHNlYXJjaHwzfHxpbmRpYW4lMjByZXN0YXVyYW50JTIwZm9vZCUyMGRpc2hlcyUyMGJ1cmdlciUyMHBpenphJTIwYmlyeWFuaXxlbnwwfHx8fDE3OTIyMjQ2MDV8MA&ixlib=rb-4.1.0&q=85"
+      },
+      {
+        "name": "Paneer Butter Masala & Naan",
+        "url": "https://images.unsplash.com/photo-1712757248842-04f6e3844374?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NzV8MHwxfHNlYXJjaHwyfHxpbmRpYW4lMjByZXN0YXVyYW50JTIwZm9vZCUyMGRpc2hlcyUyMGJ1cmdlciUyMHBpenphJTIwYmlyeWFuaXxlbnwwfHx8fDE3OTIyMjQ2MDV8MA&ixlib=rb-4.1.0&q=85"
+      },
+      {
+        "name": "Classic Cheeseburger with Fries",
+        "url": "https://images.unsplash.com/photo-1551782450-17144efb9c50?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NzV8MHwxfHNlYXJjaHwxfHxpbmRpYW4lMjByZXN0YXVyYW50JTIwZm9vZCUyMGRpc2hlcyUyMGJ1cmdlciUyMHBpenphJTIwYmlyeWFuaXxlbnwwfHx8fDE3OTIyMjQ2MDV8MA&ixlib=rb-4.1.0&q=85"
+      },
+      {
+        "name": "Assorted Indian Platter",
+        "url": "https://images.pexels.com/photos/35123985/pexels-photo-35123985.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940"
+      }
+    ]
+  },
+  "accessibility_and_testing": {
+    "data_testid_rules": "All interactive elements, buttons, inputs, tabs, order items, status switches, and totals MUST include explicit data-testid attributes (e.g. data-testid='pos-item-add-btn-1', data-testid='checkout-pay-upi-btn', data-testid='stock-toggle-switch-102')",
+    "keyboard_shortcuts": [
+      "F2: Open Quick Payment Modal",
+      "F4: Hold Current Order",
+      "F8: Print Last Receipt",
+      "Esc: Clear Selection / Close Modal",
+      "Ctrl+F / F3: Focus Search Bar"
+    ]
+  },
+  "UNIVERSAL GUIDELINES FOR MAIN AGENT": [
+    "Ensure complete Flutter Windows desktop visual presentation with top window chrome bar and dense multi-pane grid layout.",
+    "Do NOT use transparent dropdown menus or unreadable text overlays.",
+    "Always apply data-testid to every interactive component (buttons, inputs, order action buttons, toggles, table rows).",
+    "Use JetBrains Mono font or Tailwind font-mono for all currency totals, item counts, order numbers, and timestamp displays.",
+    "Include real-time websocket alert simulations (audio toggle sound effect indicator and toast notifications using sonner).",
+    "Maintain high-contrast dark theme colors (slate-950 base, slate-900 panels, teal-500 primary accents, emerald-400 monetary values)."
+  ]
+}
