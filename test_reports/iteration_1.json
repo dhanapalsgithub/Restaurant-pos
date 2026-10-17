@@ -1,0 +1,40 @@
+{
+  "summary": "Backend-only first-finish validation against public URL. All 14 requested backend features are working. Demo seed, auth, menu, orders, cash/card/UPI payments (incl. 12s demo auto-pay), UrbanPiper webhook routing, online-order simulation, stock toggle with UP sync flag, order status transitions, dashboard, and multi-tenant isolation all verified end-to-end.",
+  "tested_scope": ["backend", "auth", "integration"],
+  "passed": [
+    "POST /api/auth/login demo/demo123 returns JWT (field: token) + store object",
+    "Invalid credentials rejected with 401",
+    "GET /api/auth/me with Bearer returns demo store (username=demo)",
+    "GET /api/categories returns 5 seeded categories",
+    "GET /api/menu returns 15 seeded items",
+    "POST /api/orders creates order with correct subtotal/tax/total and ORD##### auto-increment (observed ORD00003..ORD00008)",
+    "POST /api/orders/{id}/pay/cash returns change due; order.payment_status=Paid",
+    "POST /api/orders/{id}/pay/card with reference sets payment_status=Paid, payment_ref stored (verified via GET /api/orders/{id})",
+    "POST /api/orders/{id}/pay/upi/initiate returns upi_string containing pa=, am=, cu=, tn= and demo_mode=true",
+    "GET /api/orders/{id}/pay/upi/status flips Pending -> Paid after ~12s demo auto-pay (payment_ref=pay_demo_*)",
+    "POST /api/webhooks/urbanpiper with store_ref=UP-DEMO-001 creates Swiggy order on demo store",
+    "POST /api/simulate/online-order creates Swiggy order (channel=Swiggy, order_type=Swiggy)",
+    "POST /api/menu/{id}/toggle-stock flips is_available and returns synced_to_urbanpiper=true",
+    "PUT /api/orders/{id}/status transitions Accepted->Preparing->Ready->Dispatched (field name: order_status)",
+    "GET /api/dashboard returns today_sales, today_orders, channels, payment_modes, recent",
+    "GET /api/orders?limit=5 returns <=5 orders",
+    "POST /api/stores/register creates second tenant; second store sees 0 orders and isolated menu",
+    "UrbanPiper webhook with second store's store_ref correctly routes order to second tenant (channel=Zomato)"
+  ],
+  "failed": [],
+  "contract_notes_for_frontend": [
+    "Login response field is `token` (not access_token)",
+    "UPI initiate response field is `upi_string` (not upi_link/deep_link); also returns amount, amount_paise, razorpay_order_id, demo_mode, order_number",
+    "PUT /api/orders/{id}/status body uses key `order_status` (not status)",
+    "Dashboard key is `recent` (not recent_orders)",
+    "Payment endpoints return {ok:true}; frontend should refetch order or rely on /pay/upi/status for UPI"
+  ],
+  "action_items": [],
+  "success_rate": {"backend": "100%", "frontend": "N/A (skipped per request)"},
+  "retest_needed": false,
+  "full_testing_deferred": true,
+  "mocked_integrations": [
+    "Razorpay UPI (DEMO_PAYMENT_MODE=true auto-confirms after ~12s via asyncio task) - MOCKED",
+    "UrbanPiper stock/order sync (logged only, synced_to_urbanpiper flag returned) - MOCKED"
+  ]
+}
