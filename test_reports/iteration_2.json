@@ -1,0 +1,49 @@
+{
+  "summary": "Tested the 3 new features end to end: Table Floor, Hold/Recall orders with F2/F3/F4/F8 shortcuts, and the Daily Sales Report with CSV export. Backend: 15/15 pytest tests pass against the public URL. A fresh tenant was used so the report numbers could be checked exactly (GST per slab, CGST=SGST, only Paid non-cancelled orders counted, tz_offset, 400 on a bad date, CSV headers and sections). Frontend: all requested flows work. Hold via button and via F4 (cart clears, badge goes up, toast shows), recall (cart reloads, indicator shows), F3, F2, F8 reprint (window.print stubbed and called once, no errors), floor status badges and counts, Free/Occupied/Billed click behaviour, paying a Billed table frees it, adding a table plus the duplicate error toast, deleting a table, report stat cards and tables, date change reloads, and Export CSV downloads sales-report-<date>.csv. Found 1 real bug: after payment, if the cashier closes the payment modal with Esc or the X instead of 'Skip & New Order', the cart stays. Pressing F2 then reopens the same already-paid order and lets it be paid again.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/orders/{id}/pay/cash|card|upi/initiate", "issue": "No guard against paying an order that is already Paid (or Cancelled). Combined with the frontend bug below, an order can be paid twice and payment_ref/payment_mode get overwritten. It should return 400 when payment_status is already Paid."},
+      {"endpoint": "GET /api/reports/daily", "issue": "Order-level discount is subtracted after GST (_calc_totals: total = subtotal + tax - discount). The GST breakdown uses pre-discount item values, so gross != taxable + tax whenever there is a discount. Under GST rules the discount should reduce the taxable value. Business-logic decision for the accountant."},
+      {"endpoint": "DELETE /api/tables/{id}, DELETE /api/held-orders/{id}", "issue": "Return 200 {ok:true} even when the id does not exist (should be 404). The backend also lets you delete a table that has a held or pending bill (the UI only hides the button)."},
+      {"endpoint": "POST /api/tables, POST /api/held-orders", "issue": "No validation: an empty table name and seats<=0 are accepted, and order_type is a free string."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "PosBilling + PaymentModal", "issue": "After a successful payment, closing the dialog with Esc, the X button or an outside click calls only onClose, not onPaid. The cart is not cleared and currentOrder keeps payment_status 'Pending' locally. Pressing F2 or CHARGE then reopens the same paid order (verified: ORD00015 reopened after cash payment) and lets it be paid again. Fix: when status==='paid', make onOpenChange(false) call onPaid; or update currentOrder.payment_status to Paid in onPaid / on the payment callback; and add a backend guard.", "selector": "[data-testid='pos-checkout-btn'], [role='dialog']", "priority": "HIGH"}
+    ],
+    "integration_issues": [
+      {"flow": "Recall + change table", "issue": "If a held bill for T3 is recalled, the table is switched to T5 (which already has its own held bill) and the bill is held again, the POST includes the id. The T3 doc is updated to T5, leaving 2 held docs on T5. The floor shows only the first one, so the running total is wrong. Minor edge case.", "affected_selectors": ["order-table-select", "pos-hold-btn"]},
+      {"flow": "Billed table with multiple pending orders", "issue": "running_total sums all pending orders, but clicking the table opens a payment modal for pending_orders[0] only. Cancel bill also only cancels [0]. Minor.", "affected_selectors": ["floor-table-<name>"]}
+    ],
+    "design_issues": [
+      {"screen": "POS menu grid", "issues": ["Menu images don't match the items: a burger photo is used for Paneer Tikka, Veg Spring Roll, Masala Chai, Fresh Lime Soda and Mango Lassi; a chicken/biryani photo for Gulab Jamun and Rasmalai."]},
+      {"screen": "POS cart footer", "issues": ["The 'GST (5%)' label is hardcoded, but items can have other tax_rates (the report supports 18% slabs)."]},
+      {"screen": "Global toasts", "issues": ["Sonner toasts at the top right cover the Table Floor header (Billed count, running total, add-table input) and the Reports date input and Export button for a few seconds."]},
+      {"screen": "Reports", "issues": ["The date filter uses the native browser <input type=date> instead of a shadcn Calendar/Popover, which breaks the desktop-app look."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_floor_held_reports.py", "/app/test_reports/pytest/pytest_iter2.xml"],
+  "action_items": [
+    "HIGH: Fix PaymentModal/PosBilling so closing the dialog after a successful payment also clears the cart (call onPaid when status==='paid'). Also add a server-side 400 when paying an order that is already Paid or Cancelled.",
+    "Replace the menu images that don't match their items (beverages and desserts currently show burger/chicken photos).",
+    "Show the GST label in the POS cart per item rate, or remove the hardcoded '5%'.",
+    "Optional: apply the discount before GST in _calc_totals so the GST report is accountant-correct; return 404 on deleting unknown tables/held orders; block deleting a table that has an active bill; validate table name and seats.",
+    "Optional: move the toaster position (e.g. bottom-right) so it does not cover header controls; use a shadcn date picker on Reports."
+  ],
+  "critical_code_review_comments": [
+    "PosBilling: useEffect(() => setCurrentOrder(null), [cart, orderType, tableNo]) means that changing the cart after closing an unpaid checkout creates a new order. The previous Pending order stays on the table (Billed with a doubled running_total) because the held bill was already deleted at checkout.",
+    "_next_order_number uses count_documents + 1, so concurrent orders can get duplicate order numbers (pre-existing).",
+    "The report filters on created_at, not on paid time. An order created before midnight and paid after is counted on the creation day. Acceptable, but document it for the accountant.",
+    "CSV export does not escape leading '=', '+' or '-' in item/customer fields (CSV formula injection when opened in Excel). Low risk."
+  ],
+  "updated_files": ["/app/backend/tests/test_floor_held_reports.py"],
+  "success_rate": {"backend": "100% (15/15)", "frontend": "~95% (all requested flows pass; 1 high-priority bug in the post-payment close path)"},
+  "test_credentials": "demo / demo123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Registered throwaway tenants test_<hex> (TEST_Store) with orders and held orders. On the demo store: paid orders ORD000xx (Cash) via the UI, and a Takeaway held order (1x Veg Spring Roll) left in the held list. T2's held order (2x Dal Makhani) is untouched. Table TEST_X1 was added and then deleted.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run backend tests with `-n 0` (pytest.ini enables xdist, and module fixtures would differ per worker): REACT_APP_BACKEND_URL=... pytest backend/tests/test_floor_held_reports.py -n 0. Retest: after paying in the POS modal, press Escape and then F2. It should NOT reopen the paid order, and the cart should be cleared.",
+  "rca of the issue": "Double payment: PaymentModal's Dialog onOpenChange(false) calls onClose() only. In the POS, onPaid (which clears the cart and currentOrder) runs only from close-paid-btn or print-receipt-btn. currentOrder.payment_status stays 'Pending' in local state, so checkout() goes into the `currentOrder?.payment_status === 'Pending'` branch and reopens the modal for the paid order. Repro: /pos, add item, F2, Cash, Exact, Record, press Esc, press F2: the same ORD number shows as payable again. Mitigation: call onPaid on close when status==='paid', and reject repeat payments in the backend."
+}

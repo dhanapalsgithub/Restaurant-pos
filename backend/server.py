@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from fastapi.responses import Response
@@ -228,9 +228,22 @@ ws_manager = WSManager()
 # ====================== HELPERS ======================
 async def _calc_totals(items: List[Dict[str, Any]], discount: float = 0.0):
     subtotal = sum(i["price"] * i["qty"] for i in items)
-    tax = sum((i["price"] * i["qty"]) * (i.get("tax_rate", 5.0) / 100.0) for i in items)
-    total = round(subtotal + tax - discount, 2)
+    discount = min(max(discount, 0.0), subtotal)
+    ratio = (subtotal - discount) / subtotal if subtotal else 1.0
+    tax = sum((i["price"] * i["qty"]) * (i.get("tax_rate", 5.0) / 100.0) for i in items) * ratio
+    total = round(subtotal - discount + tax, 2)
     return round(subtotal, 2), round(tax, 2), total
+
+
+async def _payable_order(oid: str, store_id: str) -> Dict[str, Any]:
+    order = await db.orders.find_one({"id": oid, "store_id": store_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(404, "Order not found")
+    if order["payment_status"] == "Paid":
+        raise HTTPException(400, "Order is already paid")
+    if order.get("order_status") == "Cancelled":
+        raise HTTPException(400, "Order is cancelled")
+    return order
 
 
 async def _next_order_number(store_id: str) -> str:
@@ -399,9 +412,9 @@ async def update_status(oid: str, data: StatusUpdateIn, current=Depends(get_curr
 # ====================== PAYMENT: CASH / CARD / UPI ======================
 @api.post("/orders/{oid}/pay/cash")
 async def pay_cash(oid: str, data: PayCashIn, current=Depends(get_current_store)):
-    order = await db.orders.find_one({"id": oid, "store_id": current["id"]}, {"_id": 0})
-    if not order:
-        raise HTTPException(404, "Order not found")
+    order = await _payable_order(oid, current["id"])
+    if data.tendered < order["total"]:
+        raise HTTPException(400, "Tendered amount is less than total")
     change = round(data.tendered - order["total"], 2)
     await db.orders.update_one({"id": oid}, {"$set": {
         "payment_mode": "Cash", "payment_status": "Paid",
@@ -414,9 +427,7 @@ async def pay_cash(oid: str, data: PayCashIn, current=Depends(get_current_store)
 
 @api.post("/orders/{oid}/pay/card")
 async def pay_card(oid: str, data: PayCardIn, current=Depends(get_current_store)):
-    order = await db.orders.find_one({"id": oid, "store_id": current["id"]}, {"_id": 0})
-    if not order:
-        raise HTTPException(404, "Order not found")
+    await _payable_order(oid, current["id"])
     await db.orders.update_one({"id": oid}, {"$set": {
         "payment_mode": "Card", "payment_status": "Paid",
         "payment_ref": data.reference, "updated_at": now_iso(),
@@ -431,9 +442,7 @@ async def pay_upi_initiate(oid: str, current=Depends(get_current_store)):
     In DEMO_MODE, returns a mock UPI string that can be rendered as QR.
     Frontend polls /status to detect payment.
     """
-    order = await db.orders.find_one({"id": oid, "store_id": current["id"]}, {"_id": 0})
-    if not order:
-        raise HTTPException(404, "Order not found")
+    order = await _payable_order(oid, current["id"])
 
     amount_paise = int(round(order["total"] * 100))
     rzp_order_id = ""
@@ -590,13 +599,13 @@ async def simulate_online_order(data: dict, current=Depends(get_current_store)):
 
 # ====================== TABLES (FLOOR VIEW) ======================
 class TableIn(BaseModel):
-    name: str
-    seats: int = 4
+    name: str = Field(min_length=1, max_length=20)
+    seats: int = Field(default=4, ge=1, le=50)
 
 
 class HeldOrderIn(BaseModel):
     id: Optional[str] = None
-    order_type: str = "Dine-In"
+    order_type: Literal["Dine-In", "Takeaway"] = "Dine-In"
     table_no: str = ""
     label: str = ""
     items: List[OrderLine]
@@ -632,10 +641,13 @@ async def list_tables(current=Depends(get_current_store)):
 
 @api.post("/tables")
 async def create_table(data: TableIn, current=Depends(get_current_store)):
-    if await db.tables.find_one({"store_id": current["id"], "name": data.name}):
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(400, "Table name is required")
+    if await db.tables.find_one({"store_id": current["id"], "name": name}):
         raise HTTPException(400, "Table name already exists")
     count = await db.tables.count_documents({"store_id": current["id"]})
-    doc = {"id": str(uuid.uuid4()), "store_id": current["id"], "name": data.name,
+    doc = {"id": str(uuid.uuid4()), "store_id": current["id"], "name": name,
            "seats": data.seats, "sort_order": count + 1}
     await db.tables.insert_one(doc.copy())
     return doc
@@ -643,7 +655,16 @@ async def create_table(data: TableIn, current=Depends(get_current_store)):
 
 @api.delete("/tables/{tid}")
 async def delete_table(tid: str, current=Depends(get_current_store)):
-    await db.tables.delete_one({"id": tid, "store_id": current["id"]})
+    sid = current["id"]
+    table = await db.tables.find_one({"id": tid, "store_id": sid}, {"_id": 0})
+    if not table:
+        raise HTTPException(404, "Table not found")
+    busy = await db.held_orders.find_one({"store_id": sid, "order_type": "Dine-In", "table_no": table["name"]}) or \
+        await db.orders.find_one({"store_id": sid, "order_type": "Dine-In", "table_no": table["name"],
+                                  "payment_status": "Pending", "order_status": {"$ne": "Cancelled"}})
+    if busy:
+        raise HTTPException(400, "Table has an open bill")
+    await db.tables.delete_one({"id": tid})
     return {"ok": True}
 
 
@@ -665,6 +686,11 @@ async def hold_order(data: HeldOrderIn, current=Depends(get_current_store)):
         existing = await db.held_orders.find_one({"id": data.id, "store_id": sid}, {"_id": 0})
     if not existing and data.order_type == "Dine-In" and data.table_no:
         existing = await db.held_orders.find_one({"store_id": sid, "order_type": "Dine-In", "table_no": data.table_no}, {"_id": 0})
+    if data.order_type == "Dine-In" and data.table_no:
+        clash = await db.held_orders.find_one({"store_id": sid, "order_type": "Dine-In", "table_no": data.table_no,
+                                               "id": {"$ne": existing["id"] if existing else ""}})
+        if clash:
+            raise HTTPException(400, f"Table {data.table_no} already has a held bill")
     doc = {
         "store_id": sid, "order_type": data.order_type,
         "table_no": data.table_no if data.order_type == "Dine-In" else "",
@@ -683,7 +709,9 @@ async def hold_order(data: HeldOrderIn, current=Depends(get_current_store)):
 
 @api.delete("/held-orders/{hid}")
 async def delete_held(hid: str, current=Depends(get_current_store)):
-    await db.held_orders.delete_one({"id": hid, "store_id": current["id"]})
+    res = await db.held_orders.delete_one({"id": hid, "store_id": current["id"]})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Held order not found")
     await ws_manager.broadcast(current["id"], {"type": "held_updated"})
     return {"ok": True}
 
@@ -708,12 +736,13 @@ async def _build_report(store_id: str, date: str, tz_offset: int):
 
     gst, items_agg, modes, channels = {}, {}, {}, {}
     for o in paid:
+        ratio = (o["subtotal"] - o.get("discount", 0)) / o["subtotal"] if o["subtotal"] else 1.0
         for i in o["items"]:
             amt = i["price"] * i["qty"]
             rate = float(i.get("tax_rate", 5.0))
             g = gst.setdefault(rate, {"rate": rate, "taxable": 0.0, "tax": 0.0})
-            g["taxable"] += amt
-            g["tax"] += amt * rate / 100
+            g["taxable"] += amt * ratio
+            g["tax"] += amt * ratio * rate / 100
             it = items_agg.setdefault(i["name"], {"name": i["name"], "qty": 0, "amount": 0.0})
             it["qty"] += i["qty"]
             it["amount"] += amt
@@ -733,7 +762,7 @@ async def _build_report(store_id: str, date: str, tz_offset: int):
         "date": date,
         "summary": {
             "gross_sales": round(gross, 2),
-            "taxable_value": round(sum(o["subtotal"] for o in paid), 2),
+            "taxable_value": round(sum(o["subtotal"] - o.get("discount", 0) for o in paid), 2),
             "total_tax": round(total_tax, 2),
             "cgst": round(total_tax / 2, 2), "sgst": round(total_tax / 2, 2),
             "discount": round(sum(o.get("discount", 0) for o in paid), 2),
@@ -864,11 +893,21 @@ async def seed_demo():
         await db.categories.insert_one(c.model_dump())
 
     img = {
-        "Starters": "https://images.unsplash.com/photo-1551782450-17144efb9c50?w=400",
-        "Main Course": "https://images.unsplash.com/photo-1727404679933-99daa2a7573a?w=400",
-        "Breads": "https://images.unsplash.com/photo-1712757248842-04f6e3844374?w=400",
-        "Beverages": "https://images.unsplash.com/photo-1551782450-17144efb9c50?w=400",
-        "Desserts": "https://images.pexels.com/photos/35123985/pexels-photo-35123985.jpeg?w=400",
+        "Paneer Tikka": "https://images.pexels.com/photos/3928854/pexels-photo-3928854.png?auto=compress&w=400",
+        "Chicken 65": "https://images.pexels.com/photos/35123974/pexels-photo-35123974.jpeg?auto=compress&w=400",
+        "Veg Spring Roll": "https://images.unsplash.com/photo-1695712641569-05eee7b37b6d?w=400",
+        "Chicken Biryani": "https://images.unsplash.com/photo-1727404679933-99daa2a7573a?w=400",
+        "Paneer Butter Masala": "https://images.unsplash.com/photo-1712757248842-04f6e3844374?w=400",
+        "Dal Makhani": "https://images.pexels.com/photos/30203314/pexels-photo-30203314.jpeg?auto=compress&w=400",
+        "Mutton Rogan Josh": "https://images.pexels.com/photos/35123985/pexels-photo-35123985.jpeg?auto=compress&w=400",
+        "Butter Naan": "https://images.unsplash.com/photo-1697155406014-04dc649b0953?w=400",
+        "Garlic Naan": "https://images.pexels.com/photos/28674556/pexels-photo-28674556.jpeg?auto=compress&w=400",
+        "Tandoori Roti": "https://images.pexels.com/photos/32965430/pexels-photo-32965430.jpeg?auto=compress&w=400",
+        "Masala Chai": "https://images.pexels.com/photos/20270270/pexels-photo-20270270.jpeg?auto=compress&w=400",
+        "Fresh Lime Soda": "https://images.pexels.com/photos/36268523/pexels-photo-36268523.jpeg?auto=compress&w=400",
+        "Mango Lassi": "https://images.pexels.com/photos/14509267/pexels-photo-14509267.jpeg?auto=compress&w=400",
+        "Gulab Jamun": "https://images.unsplash.com/photo-1666190092159-3171cf0fbb12?w=400",
+        "Rasmalai": "https://images.pexels.com/photos/39973385/pexels-photo-39973385.jpeg?auto=compress&w=400",
     }
     items = [
         ("Starters", "Paneer Tikka", 240, True),
@@ -891,7 +930,7 @@ async def seed_demo():
     for cat_name, name, price, is_veg in items:
         it = MenuItem(
             store_id=store.id, category_id=cat_map[cat_name], name=name,
-            price=price, is_veg=is_veg, image_url=img.get(cat_name, ""),
+            price=price, is_veg=is_veg, image_url=img.get(name, ""),
         )
         await db.menu_items.insert_one(it.model_dump())
     await _ensure_tables(store.id)

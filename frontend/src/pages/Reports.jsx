@@ -1,15 +1,13 @@
 import React, { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
-import { BarChart3, Download } from "lucide-react";
+import { BarChart3, Download, CalendarDays } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Calendar } from "@/components/ui/calendar";
 
-const today = () => {
-  const d = new Date();
-  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
-  return d.toISOString().slice(0, 10);
-};
+const toIso = (d) => { const x = new Date(d); x.setMinutes(x.getMinutes() - x.getTimezoneOffset()); return x.toISOString().slice(0, 10); };
+const today = () => toIso(new Date());
 const rs = (n) => `₹${Number(n || 0).toFixed(2)}`;
 
 const Stat = ({ label, value, accent = "text-slate-100", testid }) => (
@@ -41,6 +39,7 @@ const Table = ({ title, head, rows, testid }) => (
 export default function Reports() {
   const [date, setDate] = useState(today());
   const [rep, setRep] = useState(null);
+  const [calOpen, setCalOpen] = useState(false);
   const tz = new Date().getTimezoneOffset();
 
   useEffect(() => {
@@ -65,8 +64,19 @@ export default function Reports() {
           <h1 className="font-heading text-2xl font-bold text-white flex items-center gap-2"><BarChart3 className="h-6 w-6" /> Daily Sales Report</h1>
         </div>
         <div className="flex items-center gap-2">
-          <Input type="date" value={date} max={today()} onChange={(e) => e.target.value && setDate(e.target.value)}
-            data-testid="report-date-input" className="h-10 w-44 bg-slate-900 border-slate-800 font-mono-pos [color-scheme:dark]" />
+          <Popover open={calOpen} onOpenChange={setCalOpen}>
+            <PopoverTrigger asChild>
+              <button data-testid="report-date-input"
+                className="h-10 px-3 rounded-md bg-slate-900 border border-slate-800 hover:border-teal-500/50 flex items-center gap-2 font-mono-pos text-sm text-slate-100 transition-colors">
+                <CalendarDays className="h-4 w-4 text-teal-400" />
+                {new Date(`${date}T00:00:00`).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}
+              </button>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="w-auto p-0 bg-slate-900 border-slate-800 text-slate-100">
+              <Calendar mode="single" selected={new Date(`${date}T00:00:00`)} disabled={{ after: new Date() }}
+                onSelect={(d) => { if (d) { setDate(toIso(d)); setCalOpen(false); } }} initialFocus />
+            </PopoverContent>
+          </Popover>
           <Button onClick={exportCsv} disabled={!rep} data-testid="report-export-csv-btn" className="h-10 bg-teal-600 hover:bg-teal-500">
             <Download className="h-4 w-4 mr-2" /> Export CSV
           </Button>

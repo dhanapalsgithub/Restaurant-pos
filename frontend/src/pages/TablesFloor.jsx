@@ -44,7 +44,9 @@ export default function TablesFloor() {
 
   const removeTable = async (e, t) => {
     e.stopPropagation();
-    await api.delete(`/tables/${t.id}`); load();
+    try {
+      await api.delete(`/tables/${t.id}`); load();
+    } catch (err) { toast.error(err?.response?.data?.detail || "Could not delete table"); }
   };
 
   const cancelBill = async (e, o) => {
@@ -105,7 +107,9 @@ export default function TablesFloor() {
                 </div>
                 {t.status !== "Free" && (
                   <div className="flex items-end justify-between pt-2 mt-2 border-t border-slate-800">
-                    <span className="flex items-center gap-1 text-[11px] font-mono-pos text-slate-500"><Clock className="h-3 w-3" />{minsSince(t.since)}m</span>
+                    <span className="flex items-center gap-1 text-[11px] font-mono-pos text-slate-500"><Clock className="h-3 w-3" />{minsSince(t.since)}m
+                      {t.pending_orders.length > 1 && <span className="ml-1 text-rose-300" data-testid={`floor-bill-count-${t.name}`}>· {t.pending_orders.length} bills</span>}
+                    </span>
                     <span className="font-mono-pos text-lg font-extrabold text-emerald-400" data-testid={`floor-bill-${t.name}`}>₹{t.running_total.toFixed(2)}</span>
                   </div>
                 )}

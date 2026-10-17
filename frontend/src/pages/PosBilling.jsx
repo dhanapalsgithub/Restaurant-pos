@@ -10,7 +10,6 @@ import PaymentModal from "./PaymentModal";
 import HeldOrdersDialog from "./HeldOrdersDialog";
 import ReceiptPrint from "./ReceiptPrint";
 
-const GST = 5;
 
 export default function PosBilling() {
   const [categories, setCategories] = useState([]);
@@ -59,7 +58,9 @@ export default function PosBilling() {
   const holdOrder = async () => {
     if (cart.length === 0) return toast.error("Cart is empty");
     const table = orderType === "Dine-In" ? tableNo : "";
-    await api.post("/held-orders", { id: heldId, order_type: orderType, table_no: table, items: lines() });
+    try {
+      await api.post("/held-orders", { id: heldId, order_type: orderType, table_no: table, items: lines() });
+    } catch (err) { return toast.error(err?.response?.data?.detail || "Could not hold order"); }
     toast.success(table ? `Bill parked on table ${table}` : "Order held");
     setCart([]); setTableNo(""); setHeldId(null);
     refreshHeld(); api.get("/tables").then(({ data }) => setTables(data));
@@ -99,6 +100,8 @@ export default function PosBilling() {
   const subtotal = cart.reduce((s, i) => s + i.price * i.qty, 0);
   const tax = cart.reduce((s, i) => s + i.price * i.qty * (i.tax_rate / 100), 0);
   const total = +(subtotal + tax).toFixed(2);
+  const rates = [...new Set(cart.map((i) => i.tax_rate))];
+  const gstLabel = rates.length === 1 ? `GST (${rates[0]}%)` : "GST";
 
   const checkout = async () => {
     if (cart.length === 0) return toast.error("Cart is empty");
@@ -250,7 +253,7 @@ export default function PosBilling() {
 
         <div className="p-3 border-t border-slate-800 space-y-1.5">
           <div className="flex justify-between text-xs text-slate-400"><span>Subtotal</span><span className="font-mono-pos">₹{subtotal.toFixed(2)}</span></div>
-          <div className="flex justify-between text-xs text-slate-400"><span>GST ({GST}%)</span><span className="font-mono-pos">₹{tax.toFixed(2)}</span></div>
+          <div className="flex justify-between text-xs text-slate-400"><span>{gstLabel}</span><span className="font-mono-pos">₹{tax.toFixed(2)}</span></div>
           <div className="flex justify-between items-end pt-2 border-t border-slate-800">
             <span className="text-[11px] uppercase tracking-widest text-slate-400 font-semibold">Total</span>
             <span className="font-mono-pos text-3xl font-extrabold text-teal-400" data-testid="cart-total">₹{total.toFixed(2)}</span>

@@ -72,7 +72,11 @@ export default function PaymentModal({ order, open, onClose, onPaid }) {
   if (!order) return null;
 
   return (
-    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+    <Dialog open={open} onOpenChange={(v) => {
+      if (v) return;
+      if (status === "paid") onPaid?.(paidOrder || order);
+      onClose();
+    }}>
       <DialogContent className="max-w-3xl bg-slate-900 border-slate-800 text-slate-100 p-0 overflow-hidden">
         <DialogHeader className="px-6 py-4 border-b border-slate-800 bg-slate-950">
           <DialogTitle className="font-heading text-lg flex items-center justify-between">
