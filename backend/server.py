@@ -147,6 +147,7 @@ class Order(BaseModel):
     gateway_order_id: str = ""
     gateway_payment_id: str = ""
     order_status: str = "Placed"  # Placed | Accepted | Preparing | Ready | Dispatched | Completed | Cancelled
+    splits: List[Dict[str, Any]] = []
     table_no: str = ""
     customer_name: str = ""
     customer_phone: str = ""
@@ -411,42 +412,133 @@ async def update_status(oid: str, data: StatusUpdateIn, current=Depends(get_curr
     return {"ok": True}
 
 
+# ====================== SPLIT BILLS ======================
+class SplitIn(BaseModel):
+    mode: Literal["equal", "items"]
+    parts: int = Field(default=2, ge=2, le=20)
+    groups: List[List[Dict[str, int]]] = []
+
+
+def _due(o: Dict[str, Any]) -> float:
+    return round(o["total"] - sum(s["amount"] for s in o.get("splits") or [] if s["status"] == "Paid"), 2)
+
+
+@api.post("/orders/{oid}/split")
+async def split_order(oid: str, data: SplitIn, current=Depends(get_current_store)):
+    order = await _payable_order(oid, current["id"])
+    if any(s["status"] == "Paid" for s in order.get("splits") or []):
+        raise HTTPException(400, "Some shares are already paid")
+    total_p = int(round(order["total"] * 100))
+    if data.mode == "equal":
+        each, rem = divmod(total_p, data.parts)
+        shares = [{"amount_p": each + (1 if i < rem else 0), "items": []} for i in range(data.parts)]
+    else:
+        lines = order["items"]
+        if len(data.groups) < 2:
+            raise HTTPException(400, "Need at least 2 guests")
+        ratio = (order["subtotal"] - order.get("discount", 0)) / order["subtotal"] if order["subtotal"] else 1.0
+        alloc = [0] * len(lines)
+        shares = []
+        for g in data.groups:
+            its, amt = [], 0.0
+            for e in g:
+                idx, q = e.get("index", -1), e.get("qty", 0)
+                if not (0 <= idx < len(lines)) or q <= 0:
+                    raise HTTPException(400, "Invalid item allocation")
+                alloc[idx] += q
+                ln = lines[idx]
+                amt += ln["price"] * q * (1 + ln.get("tax_rate", 5.0) / 100) * ratio
+                its.append({"name": ln["name"], "qty": q, "price": ln["price"]})
+            if not its:
+                raise HTTPException(400, "Every guest needs at least one item")
+            shares.append({"amount_p": int(round(amt * 100)), "items": its})
+        if any(alloc[i] != lines[i]["qty"] for i in range(len(lines))):
+            raise HTTPException(400, "Every item must be assigned exactly once")
+        shares[-1]["amount_p"] += total_p - sum(s["amount_p"] for s in shares)
+    splits = [{"id": str(uuid.uuid4()), "label": f"Guest {i + 1}", "amount": s["amount_p"] / 100,
+               "items": s["items"], "status": "Pending", "mode": "", "ref": "", "gateway_order_id": ""}
+              for i, s in enumerate(shares)]
+    await db.orders.update_one({"id": oid}, {"$set": {"splits": splits, "payment_mode": "Split", "updated_at": now_iso()}})
+    return await db.orders.find_one({"id": oid}, {"_id": 0})
+
+
+@api.delete("/orders/{oid}/split")
+async def undo_split(oid: str, current=Depends(get_current_store)):
+    order = await _payable_order(oid, current["id"])
+    if any(s["status"] == "Paid" for s in order.get("splits") or []):
+        raise HTTPException(400, "Some shares are already paid")
+    await db.orders.update_one({"id": oid}, {"$set": {"splits": [], "payment_mode": "Pending", "updated_at": now_iso()}})
+    return await db.orders.find_one({"id": oid}, {"_id": 0})
+
+
+async def _resolve_payment(oid: str, store_id: str, split_id: Optional[str]):
+    order = await _payable_order(oid, store_id)
+    splits = order.get("splits") or []
+    if split_id:
+        sp = next((s for s in splits if s["id"] == split_id), None)
+        if not sp:
+            raise HTTPException(404, "Share not found")
+        if sp["status"] == "Paid":
+            raise HTTPException(400, "Share already paid")
+        return order, sp, sp["amount"]
+    if splits:
+        raise HTTPException(400, "Bill is split - pay each share")
+    return order, None, order["total"]
+
+
+async def _record_payment(store_id: str, order: Dict[str, Any], split: Optional[Dict[str, Any]],
+                          mode: str, ref: str, payment_id: str = "") -> bool:
+    ts = now_iso()
+    if not split:
+        await db.orders.update_one({"id": order["id"]}, {"$set": {
+            "payment_mode": mode, "payment_status": "Paid", "payment_ref": ref,
+            "gateway_payment_id": payment_id or order.get("gateway_payment_id", ""), "updated_at": ts,
+        }})
+        await ws_manager.broadcast(store_id, {"type": "payment_success", "order_id": order["id"], "mode": mode, "payment_id": payment_id})
+        return True
+    await db.orders.update_one({"id": order["id"], "splits.id": split["id"]}, {"$set": {
+        "splits.$.status": "Paid", "splits.$.mode": mode, "splits.$.ref": ref, "splits.$.paid_at": ts, "updated_at": ts,
+    }})
+    fresh = await db.orders.find_one({"id": order["id"]}, {"_id": 0})
+    paid_n = sum(1 for s in fresh["splits"] if s["status"] == "Paid")
+    all_paid = paid_n == len(fresh["splits"])
+    await db.orders.update_one({"id": order["id"]}, {"$set": {
+        "payment_status": "Paid" if all_paid else "Partial",
+        "payment_ref": f"{paid_n}/{len(fresh['splits'])} shares paid",
+    }})
+    await ws_manager.broadcast(store_id, {"type": "split_paid", "order_id": order["id"], "split_id": split["id"],
+                                          "mode": mode, "all_paid": all_paid})
+    if all_paid:
+        await ws_manager.broadcast(store_id, {"type": "payment_success", "order_id": order["id"], "mode": "Split"})
+    return all_paid
+
+
 # ====================== PAYMENT: CASH / CARD / UPI ======================
 @api.post("/orders/{oid}/pay/cash")
-async def pay_cash(oid: str, data: PayCashIn, current=Depends(get_current_store)):
-    order = await _payable_order(oid, current["id"])
-    if data.tendered < order["total"]:
-        raise HTTPException(400, "Tendered amount is less than total")
-    change = round(data.tendered - order["total"], 2)
-    await db.orders.update_one({"id": oid}, {"$set": {
-        "payment_mode": "Cash", "payment_status": "Paid",
-        "payment_ref": f"CASH-TENDERED-{data.tendered:.2f}",
-        "updated_at": now_iso(),
-    }})
-    await ws_manager.broadcast(current["id"], {"type": "payment_success", "order_id": oid, "mode": "Cash"})
-    return {"ok": True, "change": change}
+async def pay_cash(oid: str, data: PayCashIn, split_id: Optional[str] = None, current=Depends(get_current_store)):
+    order, split, due = await _resolve_payment(oid, current["id"], split_id)
+    if data.tendered < due:
+        raise HTTPException(400, "Tendered amount is less than amount due")
+    all_paid = await _record_payment(current["id"], order, split, "Cash", f"CASH-TENDERED-{data.tendered:.2f}")
+    return {"ok": True, "change": round(data.tendered - due, 2), "order_paid": all_paid}
 
 
 @api.post("/orders/{oid}/pay/card")
-async def pay_card(oid: str, data: PayCardIn, current=Depends(get_current_store)):
-    await _payable_order(oid, current["id"])
-    await db.orders.update_one({"id": oid}, {"$set": {
-        "payment_mode": "Card", "payment_status": "Paid",
-        "payment_ref": data.reference, "updated_at": now_iso(),
-    }})
-    await ws_manager.broadcast(current["id"], {"type": "payment_success", "order_id": oid, "mode": "Card"})
-    return {"ok": True}
+async def pay_card(oid: str, data: PayCardIn, split_id: Optional[str] = None, current=Depends(get_current_store)):
+    order, split, _ = await _resolve_payment(oid, current["id"], split_id)
+    all_paid = await _record_payment(current["id"], order, split, "Card", data.reference)
+    return {"ok": True, "order_paid": all_paid}
 
 
 @api.post("/orders/{oid}/pay/upi/initiate")
-async def pay_upi_initiate(oid: str, current=Depends(get_current_store)):
+async def pay_upi_initiate(oid: str, split_id: Optional[str] = None, current=Depends(get_current_store)):
     """Create a Razorpay order and return UPI deep-link + QR payload.
     In DEMO_MODE, returns a mock UPI string that can be rendered as QR.
     Frontend polls /status to detect payment.
     """
-    order = await _payable_order(oid, current["id"])
+    order, split, due = await _resolve_payment(oid, current["id"], split_id)
 
-    amount_paise = int(round(order["total"] * 100))
+    amount_paise = int(round(due * 100))
     rzp_order_id = ""
     upi_string = ""
 
@@ -467,47 +559,55 @@ async def pay_upi_initiate(oid: str, current=Depends(get_current_store)):
             logger.exception("Razorpay create failed, falling back to demo UPI string: %s", e)
 
     # Build UPI deeplink (standard EMV / UPI intent URL)
+    note = order["order_number"] + (f"-{split['label'].replace(' ', '')}" if split else "")
     upi_string = (
-        f"upi://pay?pa={vpa}&pn={order.get('store_id','Store').replace(' ','%20')}"
-        f"&am={order['total']:.2f}&cu=INR&tn={order['order_number']}"
+        f"upi://pay?pa={vpa}&pn={current.get('store_name', 'Store').replace(' ', '%20')}"
+        f"&am={due:.2f}&cu=INR&tn={note}"
     )
 
-    await db.orders.update_one({"id": oid}, {"$set": {
-        "payment_mode": "UPI", "gateway_order_id": rzp_order_id, "updated_at": now_iso(),
-    }})
+    if split:
+        await db.orders.update_one({"id": oid, "splits.id": split["id"]}, {"$set": {
+            "splits.$.gateway_order_id": rzp_order_id, "updated_at": now_iso(),
+        }})
+    else:
+        await db.orders.update_one({"id": oid}, {"$set": {
+            "payment_mode": "UPI", "gateway_order_id": rzp_order_id, "updated_at": now_iso(),
+        }})
 
     # In demo mode auto-mark paid after 12s to simulate QR scan success
     if DEMO_MODE:
-        asyncio.create_task(_demo_auto_pay(current["id"], oid))
+        asyncio.create_task(_demo_auto_pay(current["id"], oid, split["id"] if split else None))
 
     return {
-        "upi_string": upi_string, "amount": order["total"], "amount_paise": amount_paise,
+        "upi_string": upi_string, "amount": due, "amount_paise": amount_paise,
         "razorpay_order_id": rzp_order_id, "demo_mode": DEMO_MODE,
         "order_number": order["order_number"],
     }
 
 
-async def _demo_auto_pay(store_id: str, order_id: str, delay: int = 12):
+async def _demo_auto_pay(store_id: str, order_id: str, split_id: Optional[str] = None, delay: int = 12):
     await asyncio.sleep(delay)
-    order = await db.orders.find_one({"id": order_id, "store_id": store_id}, {"_id": 0})
-    if order and order.get("payment_status") != "Paid":
-        pid = f"pay_demo_{uuid.uuid4().hex[:12]}"
-        await db.orders.update_one({"id": order_id}, {"$set": {
-            "payment_status": "Paid", "payment_mode": "UPI",
-            "gateway_payment_id": pid, "payment_ref": pid, "updated_at": now_iso(),
-        }})
-        await ws_manager.broadcast(store_id, {
-            "type": "payment_success", "order_id": order_id, "mode": "UPI", "payment_id": pid,
-        })
+    try:
+        order, split, _ = await _resolve_payment(order_id, store_id, split_id)
+    except HTTPException:
+        return
+    pid = f"pay_demo_{uuid.uuid4().hex[:12]}"
+    await _record_payment(store_id, order, split, "UPI", pid, pid)
 
 
 @api.get("/orders/{oid}/pay/upi/status")
-async def pay_upi_status(oid: str, current=Depends(get_current_store)):
+async def pay_upi_status(oid: str, split_id: Optional[str] = None, current=Depends(get_current_store)):
     order = await db.orders.find_one({"id": oid, "store_id": current["id"]}, {"_id": 0})
     if not order:
         raise HTTPException(404, "Order not found")
+    if split_id:
+        sp = next((s for s in order.get("splits") or [] if s["id"] == split_id), None)
+        if not sp:
+            raise HTTPException(404, "Share not found")
+        return {"payment_status": sp["status"], "payment_mode": sp["mode"], "payment_ref": sp.get("ref", ""),
+                "order_payment_status": order["payment_status"]}
     return {"payment_status": order["payment_status"], "payment_mode": order["payment_mode"],
-            "payment_ref": order.get("payment_ref", "")}
+            "payment_ref": order.get("payment_ref", ""), "order_payment_status": order["payment_status"]}
 
 
 # ====================== RAZORPAY WEBHOOK ======================
@@ -525,16 +625,15 @@ async def razorpay_webhook(request: Request, x_razorpay_signature: Optional[str]
     rzp_order_id = entity.get("order_id", "")
     pay_id = entity.get("id", "")
     if event == "payment.captured" and rzp_order_id:
-        order = await db.orders.find_one({"gateway_order_id": rzp_order_id}, {"_id": 0})
+        order = await db.orders.find_one(
+            {"$or": [{"gateway_order_id": rzp_order_id}, {"splits.gateway_order_id": rzp_order_id}]}, {"_id": 0})
         if order:
-            await db.orders.update_one({"id": order["id"]}, {"$set": {
-                "payment_status": "Paid", "gateway_payment_id": pay_id,
-                "payment_ref": pay_id, "updated_at": now_iso(),
-            }})
-            await ws_manager.broadcast(order["store_id"], {
-                "type": "payment_success", "order_id": order["id"],
-                "mode": "UPI", "payment_id": pay_id,
-            })
+            sp = next((s for s in order.get("splits") or [] if s.get("gateway_order_id") == rzp_order_id), None)
+            try:
+                order, split, _ = await _resolve_payment(order["id"], order["store_id"], sp["id"] if sp else None)
+                await _record_payment(order["store_id"], order, split, "UPI", pay_id, pay_id)
+            except HTTPException:
+                pass
     return {"ok": True}
 
 
@@ -613,6 +712,17 @@ class HeldOrderIn(BaseModel):
     items: List[OrderLine]
 
 
+class MoveTableIn(BaseModel):
+    from_table: str
+    to_table: str
+
+
+def _open_bill_q(store_id: str, table: Optional[str] = None) -> Dict[str, Any]:
+    q = {"store_id": store_id, "order_type": "Dine-In", "payment_status": {"$in": ["Pending", "Partial"]},
+         "order_status": {"$ne": "Cancelled"}, "table_no": table if table else {"$ne": ""}}
+    return q
+
+
 async def _ensure_tables(store_id: str, n: int = 8):
     if await db.tables.count_documents({"store_id": store_id}) == 0:
         docs = [{"id": str(uuid.uuid4()), "store_id": store_id, "name": f"T{i}",
@@ -625,17 +735,14 @@ async def list_tables(current=Depends(get_current_store)):
     sid = current["id"]
     tables = await db.tables.find({"store_id": sid}, {"_id": 0}).sort("sort_order", 1).to_list(200)
     held = await db.held_orders.find({"store_id": sid, "order_type": "Dine-In", "table_no": {"$ne": ""}}, {"_id": 0}).to_list(500)
-    pending = await db.orders.find({
-        "store_id": sid, "order_type": "Dine-In", "payment_status": "Pending",
-        "table_no": {"$ne": ""}, "order_status": {"$ne": "Cancelled"},
-    }, {"_id": 0}).to_list(500)
+    pending = await db.orders.find(_open_bill_q(sid), {"_id": 0}).to_list(500)
     for t in tables:
         h = next((x for x in held if x["table_no"] == t["name"]), None)
         p = [o for o in pending if o["table_no"] == t["name"]]
         t["held_order"] = h
         t["pending_orders"] = p
         t["status"] = "Billed" if p else ("Occupied" if h else "Free")
-        t["running_total"] = round((h["total"] if h else 0) + sum(o["total"] for o in p), 2)
+        t["running_total"] = round((h["total"] if h else 0) + sum(_due(o) for o in p), 2)
         times = [x["created_at"] for x in ([h] if h else []) + p]
         t["since"] = min(times) if times else None
     return tables
@@ -662,12 +769,50 @@ async def delete_table(tid: str, current=Depends(get_current_store)):
     if not table:
         raise HTTPException(404, "Table not found")
     busy = await db.held_orders.find_one({"store_id": sid, "order_type": "Dine-In", "table_no": table["name"]}) or \
-        await db.orders.find_one({"store_id": sid, "order_type": "Dine-In", "table_no": table["name"],
-                                  "payment_status": "Pending", "order_status": {"$ne": "Cancelled"}})
+        await db.orders.find_one(_open_bill_q(sid, table["name"]))
     if busy:
         raise HTTPException(400, "Table has an open bill")
     await db.tables.delete_one({"id": tid})
     return {"ok": True}
+
+
+@api.post("/tables/move")
+async def move_table(data: MoveTableIn, current=Depends(get_current_store)):
+    sid = current["id"]
+    src, dst = data.from_table, data.to_table
+    if src == dst:
+        raise HTTPException(400, "Choose a different table")
+    names = {t["name"] for t in await db.tables.find({"store_id": sid, "name": {"$in": [src, dst]}}, {"_id": 0}).to_list(2)}
+    if names != {src, dst}:
+        raise HTTPException(404, "Table not found")
+    held_q = lambda t: {"store_id": sid, "order_type": "Dine-In", "table_no": t}  # noqa: E731
+    src_held = await db.held_orders.find_one(held_q(src), {"_id": 0})
+    src_bills = await db.orders.count_documents(_open_bill_q(sid, src))
+    if not src_held and not src_bills:
+        raise HTTPException(400, f"Table {src} has no open bill")
+    dst_held = await db.held_orders.find_one(held_q(dst), {"_id": 0})
+    merged = bool(dst_held) or await db.orders.count_documents(_open_bill_q(sid, dst)) > 0
+    if src_held and dst_held:
+        lines: Dict[tuple, Dict[str, Any]] = {}
+        for ln in dst_held["items"] + src_held["items"]:
+            key = (ln["item_id"], ln["price"], ln.get("notes", ""))
+            if key in lines:
+                lines[key]["qty"] += ln["qty"]
+            else:
+                lines[key] = dict(ln)
+        items = list(lines.values())
+        subtotal, tax, total = await _calc_totals(items)
+        await db.held_orders.update_one({"id": dst_held["id"]}, {"$set": {
+            "items": items, "subtotal": subtotal, "tax": tax, "total": total, "updated_at": now_iso(),
+            "created_at": min(dst_held["created_at"], src_held["created_at"]),
+        }})
+        await db.held_orders.delete_one({"id": src_held["id"]})
+    elif src_held:
+        await db.held_orders.update_one({"id": src_held["id"]}, {"$set": {"table_no": dst, "updated_at": now_iso()}})
+    if src_bills:
+        await db.orders.update_many(_open_bill_q(sid, src), {"$set": {"table_no": dst, "updated_at": now_iso()}})
+    await ws_manager.broadcast(sid, {"type": "held_updated"})
+    return {"ok": True, "action": "merged" if merged else "moved", "from_table": src, "to_table": dst}
 
 
 # ====================== HELD ORDERS ======================
@@ -728,40 +873,52 @@ def _day_range(date_str: str, tz_offset: int):
     return start.isoformat(), (start + timedelta(days=1)).isoformat()
 
 
-async def _build_report(store_id: str, date: str, tz_offset: int):
-    start, end = _day_range(date, tz_offset)
-    orders = await db.orders.find(
-        {"store_id": store_id, "created_at": {"$gte": start, "$lt": end}}, {"_id": 0}
-    ).sort("created_at", 1).to_list(10000)
-    paid = [o for o in orders if o["payment_status"] == "Paid" and o.get("order_status") != "Cancelled"]
-    pending = [o for o in orders if o["payment_status"] == "Pending" and o.get("order_status") != "Cancelled"]
-
-    gst, items_agg, modes, channels = {}, {}, {}, {}
-    for o in paid:
+def _gst_by_rate(orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    gst: Dict[float, Dict[str, float]] = {}
+    for o in orders:
         ratio = (o["subtotal"] - o.get("discount", 0)) / o["subtotal"] if o["subtotal"] else 1.0
         for i in o["items"]:
-            amt = i["price"] * i["qty"]
+            amt = i["price"] * i["qty"] * ratio
             rate = float(i.get("tax_rate", 5.0))
-            g = gst.setdefault(rate, {"rate": rate, "taxable": 0.0, "tax": 0.0})
-            g["taxable"] += amt * ratio
-            g["tax"] += amt * ratio * rate / 100
+            g = gst.setdefault(rate, {"taxable": 0.0, "tax": 0.0, "qty": 0, "value": 0.0})
+            g["taxable"] += amt
+            g["tax"] += amt * rate / 100
+            g["qty"] += i["qty"]
+            g["value"] += amt * (1 + rate / 100)
+    return [{"rate": r, "taxable": round(g["taxable"], 2), "cgst": round(g["tax"] / 2, 2), "sgst": round(g["tax"] / 2, 2),
+             "total_tax": round(g["tax"], 2), "qty": g["qty"], "total_value": round(g["value"], 2)}
+            for r, g in sorted(gst.items())]
+
+
+def _bump(d: Dict[str, Dict[str, Any]], key: str, label: str, amt: float):
+    r = d.setdefault(key, {label: key, "count": 0, "amount": 0.0})
+    r["count"] += 1
+    r["amount"] = round(r["amount"] + amt, 2)
+
+
+async def _fetch_orders(store_id: str, start: str, end: str) -> List[Dict[str, Any]]:
+    return await db.orders.find(
+        {"store_id": store_id, "created_at": {"$gte": start, "$lt": end}}, {"_id": 0}
+    ).sort("created_at", 1).to_list(50000)
+
+
+def _aggregate(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
+    live = [o for o in orders if o.get("order_status") != "Cancelled"]
+    paid = [o for o in live if o["payment_status"] == "Paid"]
+    pending = [o for o in live if o["payment_status"] in ("Pending", "Partial")]
+    items_agg, modes, channels = {}, {}, {}
+    for o in paid:
+        for i in o["items"]:
             it = items_agg.setdefault(i["name"], {"name": i["name"], "qty": 0, "amount": 0.0})
             it["qty"] += i["qty"]
-            it["amount"] += amt
-        m = modes.setdefault(o["payment_mode"], {"mode": o["payment_mode"], "count": 0, "amount": 0.0})
-        m["count"] += 1
-        m["amount"] += o["total"]
-        c = channels.setdefault(o.get("channel", "POS"), {"channel": o.get("channel", "POS"), "count": 0, "amount": 0.0})
-        c["count"] += 1
-        c["amount"] += o["total"]
-
-    gst_rows = [{"rate": g["rate"], "taxable": round(g["taxable"], 2), "cgst": round(g["tax"] / 2, 2),
-                 "sgst": round(g["tax"] / 2, 2), "total_tax": round(g["tax"], 2)}
-                for g in sorted(gst.values(), key=lambda x: x["rate"])]
+            it["amount"] += i["price"] * i["qty"]
+        pays = [(s["mode"], s["amount"]) for s in o["splits"]] if o.get("splits") else [(o["payment_mode"], o["total"])]
+        for mode, amt in pays:
+            _bump(modes, mode, "mode", amt)
+        _bump(channels, o.get("channel", "POS"), "channel", o["total"])
     gross = sum(o["total"] for o in paid)
     total_tax = sum(o["tax"] for o in paid)
     return {
-        "date": date,
         "summary": {
             "gross_sales": round(gross, 2),
             "taxable_value": round(sum(o["subtotal"] - o.get("discount", 0) for o in paid), 2),
@@ -770,16 +927,21 @@ async def _build_report(store_id: str, date: str, tz_offset: int):
             "discount": round(sum(o.get("discount", 0) for o in paid), 2),
             "paid_orders": len(paid),
             "pending_orders": len(pending),
-            "pending_amount": round(sum(o["total"] for o in pending), 2),
+            "pending_amount": round(sum(_due(o) for o in pending), 2),
             "avg_ticket": round(gross / len(paid), 2) if paid else 0.0,
         },
-        "gst_breakdown": gst_rows,
-        "payment_modes": [{**m, "amount": round(m["amount"], 2)} for m in modes.values()],
-        "channels": [{**c, "amount": round(c["amount"], 2)} for c in channels.values()],
+        "gst_breakdown": _gst_by_rate(paid),
+        "payment_modes": list(modes.values()),
+        "channels": list(channels.values()),
         "top_items": sorted(({**v, "amount": round(v["amount"], 2)} for v in items_agg.values()),
                             key=lambda x: x["amount"], reverse=True)[:10],
         "orders": paid + pending,
     }
+
+
+async def _build_report(store_id: str, date: str, tz_offset: int):
+    start, end = _day_range(date, tz_offset)
+    return {"date": date, **_aggregate(await _fetch_orders(store_id, start, end))}
 
 
 @api.get("/reports/daily")
@@ -827,6 +989,177 @@ async def daily_report_csv(date: str, tz_offset: int = 0, current=Depends(get_cu
                     round(o["tax"] / 2, 2), o.get("discount", 0), o["total"]])
     return Response(content=buf.getvalue(), media_type="text/csv",
                     headers={"Content-Disposition": f'attachment; filename="sales-report-{date}.csv"'})
+
+
+# ====================== MONTHLY GST REPORT ======================
+GST_STATES = {
+    "01": "Jammu and Kashmir", "02": "Himachal Pradesh", "03": "Punjab", "04": "Chandigarh", "05": "Uttarakhand",
+    "06": "Haryana", "07": "Delhi", "08": "Rajasthan", "09": "Uttar Pradesh", "10": "Bihar", "11": "Sikkim",
+    "12": "Arunachal Pradesh", "13": "Nagaland", "14": "Manipur", "15": "Mizoram", "16": "Tripura",
+    "17": "Meghalaya", "18": "Assam", "19": "West Bengal", "20": "Jharkhand", "21": "Odisha",
+    "22": "Chhattisgarh", "23": "Madhya Pradesh", "24": "Gujarat",
+    "26": "Dadra and Nagar Haveli and Daman and Diu", "27": "Maharashtra", "29": "Karnataka", "30": "Goa",
+    "31": "Lakshadweep", "32": "Kerala", "33": "Tamil Nadu", "34": "Puducherry",
+    "35": "Andaman and Nicobar Islands", "36": "Telangana", "37": "Andhra Pradesh", "38": "Ladakh",
+    "97": "Other Territory",
+}
+RESTAURANT_SAC = "996331"
+ECO_CHANNELS = ("Swiggy", "Zomato")
+
+
+def _month_range(month: str, tz_offset: int):
+    try:
+        d = datetime.strptime(month, "%Y-%m").replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise HTTPException(400, "month must be YYYY-MM")
+    nxt = (d.replace(day=28) + timedelta(days=4)).replace(day=1)
+    off = timedelta(minutes=tz_offset)
+    return (d + off).isoformat(), (nxt + off).isoformat()
+
+
+async def _build_monthly(store: Dict[str, Any], month: str, tz_offset: int) -> Dict[str, Any]:
+    start, end = _month_range(month, tz_offset)
+    orders = await _fetch_orders(store["id"], start, end)
+    agg = _aggregate(orders)
+    paid = [o for o in agg["orders"] if o["payment_status"] == "Paid"]
+    pos_paid = [o for o in paid if o.get("channel", "POS") not in ECO_CHANNELS]
+    eco_paid = [o for o in paid if o.get("channel") in ECO_CHANNELS]
+    code = (store.get("gst_number") or "")[:2]
+    place = f"{code}-{GST_STATES[code]}" if code in GST_STATES else ""
+
+    pos_gst = _gst_by_rate(pos_paid)
+    b2cs = [{"type": "OE", "place_of_supply": place, "rate": g["rate"], "taxable": g["taxable"],
+             "cgst": g["cgst"], "sgst": g["sgst"], "cess": 0.0} for g in pos_gst]
+    hsn = [{"hsn": RESTAURANT_SAC, "description": "Restaurant services", "uqc": "NA", "qty": g["qty"],
+            "total_value": g["total_value"], "rate": g["rate"], "taxable": g["taxable"], "igst": 0.0,
+            "cgst": g["cgst"], "sgst": g["sgst"], "cess": 0.0} for g in pos_gst]
+    pos_taxable = round(sum(g["taxable"] for g in pos_gst), 2)
+    pos_tax = round(sum(g["total_tax"] for g in pos_gst), 2)
+
+    eco: Dict[str, Dict[str, Any]] = {}
+    for o in eco_paid:
+        r = eco.setdefault(o["channel"], {"operator": o["channel"], "orders": 0, "taxable": 0.0, "tax": 0.0, "total": 0.0})
+        r["orders"] += 1
+        r["taxable"] += o["subtotal"] - o.get("discount", 0)
+        r["tax"] += o["tax"]
+        r["total"] += o["total"]
+    eco_rows = [{**r, "taxable": round(r["taxable"], 2), "tax": round(r["tax"], 2), "total": round(r["total"], 2)} for r in eco.values()]
+    eco_taxable = round(sum(r["taxable"] for r in eco_rows), 2)
+
+    pos_docs = sorted((o for o in orders if o.get("channel", "POS") not in ECO_CHANNELS), key=lambda o: o["order_number"])
+    cancelled = sum(1 for o in pos_docs if o.get("order_status") == "Cancelled")
+    docs = [{"nature": "Invoices for outward supply",
+             "from": pos_docs[0]["order_number"] if pos_docs else "", "to": pos_docs[-1]["order_number"] if pos_docs else "",
+             "total": len(pos_docs), "cancelled": cancelled, "net_issued": len(pos_docs) - cancelled}]
+
+    daily: Dict[str, Dict[str, Any]] = {}
+    for o in paid:
+        day = (datetime.fromisoformat(o["created_at"]) - timedelta(minutes=tz_offset)).date().isoformat()
+        r = daily.setdefault(day, {"date": day, "orders": 0, "taxable": 0.0, "cgst": 0.0, "sgst": 0.0, "total": 0.0})
+        r["orders"] += 1
+        r["taxable"] += o["subtotal"] - o.get("discount", 0)
+        r["cgst"] += o["tax"] / 2
+        r["sgst"] += o["tax"] / 2
+        r["total"] += o["total"]
+    daily_rows = [{k: (round(v, 2) if isinstance(v, float) else v) for k, v in r.items()} for _, r in sorted(daily.items())]
+
+    return {
+        "month": month, "gstin": store.get("gst_number", ""), "place_of_supply": place,
+        "summary": {
+            "gross_sales": agg["summary"]["gross_sales"], "paid_orders": len(paid),
+            "pos_taxable": pos_taxable, "pos_cgst": round(pos_tax / 2, 2), "pos_sgst": round(pos_tax / 2, 2),
+            "pos_tax": pos_tax, "eco_taxable": eco_taxable,
+            "eco_tax": round(sum(r["tax"] for r in eco_rows), 2),
+            "cancelled_invoices": cancelled, "pending_orders": agg["summary"]["pending_orders"],
+        },
+        "gstr3b": [
+            {"section": "3.1(a) Outward taxable supplies", "taxable": pos_taxable, "igst": 0.0,
+             "cgst": round(pos_tax / 2, 2), "sgst": round(pos_tax / 2, 2), "cess": 0.0},
+            {"section": "3.1.1(ii) Supplies via e-commerce operator u/s 9(5)", "taxable": eco_taxable, "igst": 0.0,
+             "cgst": 0.0, "sgst": 0.0, "cess": 0.0},
+        ],
+        "b2cs": b2cs, "hsn": hsn, "docs": docs, "eco": eco_rows, "daily": daily_rows,
+        "gst_breakdown": agg["gst_breakdown"],
+    }
+
+
+@api.get("/reports/monthly")
+async def monthly_report(month: str, tz_offset: int = 0, current=Depends(get_current_store)):
+    return await _build_monthly(current, month, tz_offset)
+
+
+@api.get("/reports/monthly/csv")
+async def monthly_report_csv(month: str, kind: Literal["full", "b2cs", "hsn", "docs"] = "full",
+                             tz_offset: int = 0, current=Depends(get_current_store)):
+    rep = await _build_monthly(current, month, tz_offset)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+
+    def b2cs_rows():
+        w.writerow(["Type", "Place Of Supply", "Applicable % of Tax Rate", "Rate", "Taxable Value", "Cess Amount", "E-Commerce GSTIN"])
+        for r in rep["b2cs"]:
+            w.writerow([r["type"], r["place_of_supply"], "", r["rate"], r["taxable"], r["cess"], ""])
+
+    def hsn_rows():
+        w.writerow(["HSN", "Description", "UQC", "Total Quantity", "Total Value", "Rate", "Taxable Value",
+                    "Integrated Tax Amount", "Central Tax Amount", "State/UT Tax Amount", "Cess Amount"])
+        for r in rep["hsn"]:
+            w.writerow([r["hsn"], r["description"], r["uqc"], r["qty"], r["total_value"], r["rate"], r["taxable"],
+                        r["igst"], r["cgst"], r["sgst"], r["cess"]])
+
+    def docs_rows():
+        w.writerow(["Nature of Document", "Sr. No. From", "Sr. No. To", "Total Number", "Cancelled"])
+        for r in rep["docs"]:
+            w.writerow([r["nature"], r["from"], r["to"], r["total"], r["cancelled"]])
+
+    if kind == "b2cs":
+        b2cs_rows()
+    elif kind == "hsn":
+        hsn_rows()
+    elif kind == "docs":
+        docs_rows()
+    else:
+        s = rep["summary"]
+        w.writerow(["Monthly GST Report", current.get("store_name", "")])
+        w.writerow(["GSTIN", rep["gstin"]])
+        w.writerow(["Return period", month])
+        w.writerow(["Place of supply", rep["place_of_supply"]])
+        w.writerow([])
+        w.writerow(["SUMMARY"])
+        for label, key in [("Gross sales (all channels)", "gross_sales"), ("Paid orders", "paid_orders"),
+                           ("Taxable value - own supplies", "pos_taxable"), ("CGST payable", "pos_cgst"),
+                           ("SGST payable", "pos_sgst"), ("Total GST payable", "pos_tax"),
+                           ("Taxable value - via e-commerce operators u/s 9(5)", "eco_taxable"),
+                           ("GST collected by e-commerce operators", "eco_tax"),
+                           ("Cancelled invoices", "cancelled_invoices")]:
+            w.writerow([label, s[key]])
+        w.writerow([])
+        w.writerow(["GSTR-3B"])
+        w.writerow(["Section", "Taxable Value", "IGST", "CGST", "SGST", "Cess"])
+        for r in rep["gstr3b"]:
+            w.writerow([r["section"], r["taxable"], r["igst"], r["cgst"], r["sgst"], r["cess"]])
+        w.writerow([])
+        w.writerow(["GSTR-1 B2CS"])
+        b2cs_rows()
+        w.writerow([])
+        w.writerow(["GSTR-1 HSN SUMMARY"])
+        hsn_rows()
+        w.writerow([])
+        w.writerow(["GSTR-1 DOCUMENTS ISSUED"])
+        docs_rows()
+        w.writerow([])
+        w.writerow(["E-COMMERCE OPERATOR SUPPLIES u/s 9(5)"])
+        w.writerow(["Operator", "Orders", "Taxable Value", "GST (paid by operator)", "Total"])
+        for r in rep["eco"]:
+            w.writerow([r["operator"], r["orders"], r["taxable"], r["tax"], r["total"]])
+        w.writerow([])
+        w.writerow(["DAY-WISE SALES"])
+        w.writerow(["Date", "Orders", "Taxable Value", "CGST", "SGST", "Total"])
+        for r in rep["daily"]:
+            w.writerow([r["date"], r["orders"], r["taxable"], r["cgst"], r["sgst"], r["total"]])
+    name = f"gst-{kind}-{month}.csv"
+    return Response(content=buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 # ====================== DASHBOARD ======================

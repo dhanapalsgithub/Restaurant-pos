@@ -16,6 +16,7 @@ import OrdersHistory from "@/pages/OrdersHistory";
 import Settings from "@/pages/Settings";
 import TablesFloor from "@/pages/TablesFloor";
 import Reports from "@/pages/Reports";
+import MonthlyGst from "@/pages/MonthlyGst";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false } },
@@ -42,6 +43,7 @@ function AppRoutes() {
         <Route path="settings" element={<Settings />} />
         <Route path="tables" element={<TablesFloor />} />
         <Route path="reports" element={<Reports />} />
+        <Route path="reports/monthly" element={<MonthlyGst />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

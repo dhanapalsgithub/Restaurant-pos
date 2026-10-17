@@ -5,8 +5,9 @@ import { useAuth } from "@/lib/auth";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
-import { LayoutGrid, Plus, Users, Clock, Trash2, XCircle } from "lucide-react";
+import { LayoutGrid, Plus, Users, Clock, Trash2, XCircle, ArrowRightLeft } from "lucide-react";
 import PaymentModal from "./PaymentModal";
+import MoveTableDialog from "./MoveTableDialog";
 
 const STATUS = {
   Free: { card: "border-slate-800 hover:border-emerald-500/50", badge: "bg-emerald-500/10 text-emerald-400 border-emerald-500/30", dot: "bg-emerald-400" },
@@ -22,6 +23,7 @@ export default function TablesFloor() {
   const [tables, setTables] = useState([]);
   const [payOrder, setPayOrder] = useState(null);
   const [newName, setNewName] = useState("");
+  const [moveFrom, setMoveFrom] = useState(null);
 
   const load = async () => setTables((await api.get("/tables")).data);
   useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, []);
@@ -106,6 +108,12 @@ export default function TablesFloor() {
                   {t.status === "Free" ? <span className="text-slate-600">Tap to start a new bill</span> : lines.map((i) => `${i.qty}× ${i.name}`).join(", ")}
                 </div>
                 {t.status !== "Free" && (
+                  <button onClick={(e) => { e.stopPropagation(); setMoveFrom(t); }} data-testid={`floor-move-${t.name}`}
+                    className="mt-2 self-start h-6 px-2 rounded border border-slate-700 bg-slate-950 text-[10px] font-semibold uppercase tracking-wider text-slate-400 hover:text-indigo-300 hover:border-indigo-500/50 flex items-center gap-1 transition-colors">
+                    <ArrowRightLeft className="h-3 w-3" /> Move / Merge
+                  </button>
+                )}
+                {t.status !== "Free" && (
                   <div className="flex items-end justify-between pt-2 mt-2 border-t border-slate-800">
                     <span className="flex items-center gap-1 text-[11px] font-mono-pos text-slate-500"><Clock className="h-3 w-3" />{minsSince(t.since)}m
                       {t.pending_orders.length > 1 && <span className="ml-1 text-rose-300" data-testid={`floor-bill-count-${t.name}`}>· {t.pending_orders.length} bills</span>}
@@ -115,7 +123,7 @@ export default function TablesFloor() {
                 )}
                 {t.status === "Billed" && (
                   <button onClick={(e) => cancelBill(e, t.pending_orders[0])} data-testid={`floor-cancel-bill-${t.name}`}
-                    className="absolute bottom-[52px] right-3 text-[10px] text-slate-500 hover:text-rose-400 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    className="absolute top-12 right-3 text-[10px] text-slate-500 hover:text-rose-400 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                     <XCircle className="h-3 w-3" /> Cancel bill
                   </button>
                 )}
@@ -132,6 +140,7 @@ export default function TablesFloor() {
       </div>
 
       <PaymentModal order={payOrder} open={!!payOrder} onClose={() => setPayOrder(null)} onPaid={() => { setPayOrder(null); load(); }} />
+      <MoveTableDialog source={moveFrom} tables={tables} onClose={() => setMoveFrom(null)} onDone={() => { setMoveFrom(null); load(); }} />
     </div>
   );
 }

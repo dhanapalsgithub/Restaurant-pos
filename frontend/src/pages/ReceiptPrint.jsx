@@ -32,6 +32,9 @@ export default function ReceiptPrint({ order, store }) {
       </div>
       <hr />
       <div className="row"><span>Payment</span><span>{order.payment_mode}</span></div>
+      {order.splits?.length > 0 && order.splits.map((s) => (
+        <div key={s.id} className="row"><span>  {s.label} · {s.mode || "Due"}</span><span>₹{s.amount.toFixed(2)}</span></div>
+      ))}
       {order.payment_ref && <div className="row"><span>Ref</span><span>{order.payment_ref}</span></div>}
       <hr />
       <div className="center">** Thank you · Visit again **</div>

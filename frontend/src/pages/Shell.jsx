@@ -14,7 +14,7 @@ const navItems = [
   { to: "/online", label: "Online Orders", icon: Flame, testid: "nav-online" },
   { to: "/menu", label: "Menu & Stock", icon: Boxes, testid: "nav-menu" },
   { to: "/orders", label: "Orders History", icon: Receipt, testid: "nav-orders" },
-  { to: "/reports", label: "Daily Report", icon: BarChart3, testid: "nav-reports" },
+  { to: "/reports", label: "Reports & GST", icon: BarChart3, testid: "nav-reports" },
   { to: "/settings", label: "Settings", icon: SettingsIcon, testid: "nav-settings" },
 ];
 
@@ -51,6 +51,9 @@ export default function Shell() {
       }
       if (msg.type === "payment_success" && msg.mode === "UPI") {
         toast.success(`Payment received · ${msg.mode}`);
+      }
+      if (msg.type === "split_paid" && msg.mode === "UPI") {
+        toast.success("Share paid · UPI");
       }
     });
   }, [subscribe, muted]);

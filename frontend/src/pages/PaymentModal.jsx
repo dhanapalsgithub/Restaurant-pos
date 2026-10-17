@@ -6,69 +6,114 @@ import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { toast } from "sonner";
-import { Banknote, CreditCard, QrCode, CheckCircle2, Printer } from "lucide-react";
+import { Banknote, CreditCard, QrCode, CheckCircle2, Printer, Split, ArrowLeft } from "lucide-react";
 import ReceiptPrint from "./ReceiptPrint";
+import SplitSetup from "./SplitSetup";
+import SplitShares from "./SplitShares";
 
 export default function PaymentModal({ order, open, onClose, onPaid }) {
   const { subscribe, store } = useAuth();
+  const [ord, setOrd] = useState(order);
   const [mode, setMode] = useState("UPI");
   const [tendered, setTendered] = useState(order?.total ?? 0);
   const [cardRef, setCardRef] = useState("");
   const [upi, setUpi] = useState(null);
   const [status, setStatus] = useState("idle"); // idle | waiting | paid
   const [paidOrder, setPaidOrder] = useState(null);
+  const [splitSetup, setSplitSetup] = useState(false);
+  const [share, setShare] = useState(null);
   const pollRef = useRef(null);
+  const shareRef = useRef(null);
+  shareRef.current = share;
 
-  React.useEffect(() => { if (open) { setTendered(order?.total ?? 0); setStatus("idle"); setUpi(null); setPaidOrder(null); } }, [open, order]);
+  const stopPoll = () => { if (pollRef.current) clearInterval(pollRef.current); pollRef.current = null; };
+  const resetPay = (amount) => { stopPoll(); setUpi(null); setCardRef(""); setTendered(amount); setStatus("idle"); };
 
-  // Listen for websocket payment_success
+  const refresh = async () => {
+    const { data } = await api.get(`/orders/${order.id}`);
+    setOrd(data);
+    if (data.payment_status === "Paid") { stopPoll(); setPaidOrder(data); setStatus("paid"); }
+    return data;
+  };
+
+  const shareDone = (data, sid) => {
+    if (data.payment_status === "Paid" || !shareRef.current || shareRef.current.id !== sid) return;
+    setShare(null); resetPay(0);
+  };
+
+  React.useEffect(() => {
+    if (!open || !order) return;
+    setOrd(order); setPaidOrder(null); setShare(null); setSplitSetup(false); resetPay(order.total);
+    refresh();
+    return stopPoll;
+  }, [open, order]);
+
   React.useEffect(() => {
     if (!open) return;
     return subscribe((m) => {
-      if (m.type === "payment_success" && m.order_id === order?.id) {
-        setStatus("paid"); setPaidOrder({ ...order, payment_status: "Paid", payment_mode: m.mode, payment_ref: m.payment_id || "" });
-      }
+      if (m.order_id !== order?.id) return;
+      if (m.type === "payment_success") refresh();
+      if (m.type === "split_paid") refresh().then((d) => shareDone(d, m.split_id));
     });
   }, [open, order, subscribe]);
 
-  const change = Math.max(0, (Number(tendered) || 0) - (order?.total || 0));
+  const due = share ? share.amount : (ord?.total || 0);
+  const q = share ? { params: { split_id: share.id } } : {};
+  const change = Math.max(0, (Number(tendered) || 0) - due);
+  const fail = (e) => toast.error(e?.response?.data?.detail || "Payment failed");
+
+  const finish = async (msg) => {
+    toast.success(msg);
+    const sid = share?.id;
+    const data = await refresh();
+    if (sid) shareDone(data, sid);
+  };
 
   const payCash = async () => {
-    if (Number(tendered) < order.total) return toast.error("Tendered less than total");
-    const { data } = await api.post(`/orders/${order.id}/pay/cash`, { tendered: Number(tendered) });
-    setStatus("paid"); setPaidOrder({ ...order, payment_status: "Paid", payment_mode: "Cash" });
-    toast.success(`Cash paid · change ₹${data.change.toFixed(2)}`);
+    if (Number(tendered) < due) return toast.error("Tendered less than amount due");
+    try {
+      const { data } = await api.post(`/orders/${order.id}/pay/cash`, { tendered: Number(tendered) }, q);
+      finish(`Cash paid · change ₹${data.change.toFixed(2)}`);
+    } catch (e) { fail(e); }
   };
 
   const payCard = async () => {
     if (!cardRef.trim()) return toast.error("Enter EDC reference");
-    await api.post(`/orders/${order.id}/pay/card`, { reference: cardRef });
-    setStatus("paid"); setPaidOrder({ ...order, payment_status: "Paid", payment_mode: "Card", payment_ref: cardRef });
-    toast.success("Card payment recorded");
+    try {
+      await api.post(`/orders/${order.id}/pay/card`, { reference: cardRef }, q);
+      finish("Card payment recorded");
+    } catch (e) { fail(e); }
   };
 
   const startUpi = async () => {
-    const { data } = await api.post(`/orders/${order.id}/pay/upi/initiate`);
-    setUpi(data); setStatus("waiting");
-    // Fallback polling in case WS misses
+    try {
+      const { data } = await api.post(`/orders/${order.id}/pay/upi/initiate`, null, q);
+      setUpi(data); setStatus("waiting");
+    } catch (e) { return fail(e); }
+    const sid = share?.id;
     pollRef.current = setInterval(async () => {
-      const { data: st } = await api.get(`/orders/${order.id}/pay/upi/status`);
+      const { data: st } = await api.get(`/orders/${order.id}/pay/upi/status`, sid ? { params: { split_id: sid } } : {});
       if (st.payment_status === "Paid") {
-        clearInterval(pollRef.current);
-        setStatus("paid");
-        setPaidOrder({ ...order, payment_status: "Paid", payment_mode: "UPI", payment_ref: st.payment_ref });
+        stopPoll();
+        const fresh = await refresh();
+        if (sid) shareDone(fresh, sid);
       }
     }, 3000);
   };
 
-  React.useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+  const payShare = (s) => { setShare(s); resetPay(s.amount); };
+  const undoSplit = async () => {
+    try { const { data } = await api.delete(`/orders/${order.id}/split`); setOrd(data); toast("Split removed"); }
+    catch (e) { fail(e); }
+  };
 
   const printAndClose = () => {
     window.print();
     setTimeout(() => { onPaid?.(paidOrder || order); onClose(); }, 400);
   };
 
-  if (!order) return null;
+  if (!order || !ord) return null;
+  const hasSplits = (ord.splits || []).length > 0;
 
   return (
     <Dialog open={open} onOpenChange={(v) => {
@@ -78,9 +123,15 @@ export default function PaymentModal({ order, open, onClose, onPaid }) {
     }}>
       <DialogContent className="max-w-3xl bg-slate-900 border-slate-800 text-slate-100 p-0 overflow-hidden">
         <DialogHeader className="px-6 py-4 border-b border-slate-800 bg-slate-950">
-          <DialogTitle className="font-heading text-lg flex items-center justify-between">
-            <span>Checkout · <span className="font-mono-pos text-teal-400">{order.order_number}</span></span>
-            <span className="font-mono-pos text-3xl text-emerald-400">₹{order.total.toFixed(2)}</span>
+          <DialogTitle className="font-heading text-lg flex items-center justify-between gap-3">
+            <span className="flex-1">Checkout · <span className="font-mono-pos text-teal-400">{ord.order_number}</span></span>
+            {!hasSplits && !splitSetup && status === "idle" && (
+              <button onClick={() => setSplitSetup(true)} data-testid="split-bill-btn"
+                className="h-8 px-3 rounded-md border border-indigo-500/40 bg-indigo-500/10 text-indigo-300 hover:bg-indigo-500/20 text-xs font-semibold uppercase tracking-wider flex items-center gap-1.5 transition-colors">
+                <Split className="h-3.5 w-3.5" /> Split bill
+              </button>
+            )}
+            <span className="font-mono-pos text-3xl text-emerald-400" data-testid="checkout-total">₹{ord.total.toFixed(2)}</span>
           </DialogTitle>
         </DialogHeader>
 
@@ -90,7 +141,7 @@ export default function PaymentModal({ order, open, onClose, onPaid }) {
               <CheckCircle2 className="h-9 w-9 text-emerald-400" />
             </div>
             <h3 className="font-heading text-2xl font-bold text-white">Payment received</h3>
-            <p className="text-sm text-slate-400 mt-1 mb-5">Order {order.order_number} · {paidOrder?.payment_mode || mode}</p>
+            <p className="text-sm text-slate-400 mt-1 mb-5">Order {ord.order_number} · {paidOrder?.payment_mode || mode}{hasSplits ? ` · ${ord.splits.length} shares` : ""}</p>
             <div className="flex gap-3">
               <Button onClick={printAndClose} className="bg-teal-600 hover:bg-teal-500" data-testid="print-receipt-btn">
                 <Printer className="h-4 w-4 mr-2" /> Print receipt (Customer + KOT)
@@ -100,8 +151,21 @@ export default function PaymentModal({ order, open, onClose, onPaid }) {
             </div>
             <ReceiptPrint order={paidOrder || order} store={store} />
           </div>
+        ) : splitSetup ? (
+          <SplitSetup order={ord} onCancel={() => setSplitSetup(false)} onCreated={(o) => { setOrd(o); setSplitSetup(false); }} />
+        ) : hasSplits && !share ? (
+          <SplitShares order={ord} onPay={payShare} onUndo={undoSplit} />
         ) : (
           <>
+            {share && (
+              <div className="flex items-center justify-between px-6 py-2.5 bg-indigo-500/10 border-b border-indigo-500/30" data-testid="share-banner">
+                <button onClick={() => { setShare(null); resetPay(0); }} data-testid="share-back-btn"
+                  className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-indigo-300 hover:text-indigo-200">
+                  <ArrowLeft className="h-3.5 w-3.5" /> All shares
+                </button>
+                <span className="text-sm text-indigo-200">Collecting <b>{share.label}</b> · <span className="font-mono-pos font-bold">₹{share.amount.toFixed(2)}</span></span>
+              </div>
+            )}
             <div className="grid grid-cols-3 gap-0 border-b border-slate-800">
               {[
                 { key: "UPI", icon: QrCode, color: "text-teal-400" },
@@ -133,7 +197,7 @@ export default function PaymentModal({ order, open, onClose, onPaid }) {
                   </div>
                   <div className="flex-1 flex flex-col">
                     <div className="text-[11px] uppercase tracking-widest text-teal-400 font-semibold mb-1">UPI / Razorpay</div>
-                    <h3 className="font-heading text-xl font-bold text-white mb-3">Scan to pay ₹{order.total.toFixed(2)}</h3>
+                    <h3 className="font-heading text-xl font-bold text-white mb-3">Scan to pay ₹{due.toFixed(2)}</h3>
                     {!upi && (
                       <Button onClick={startUpi} data-testid="upi-generate-btn"
                         className="bg-teal-600 hover:bg-teal-500 self-start">
@@ -171,7 +235,7 @@ export default function PaymentModal({ order, open, onClose, onPaid }) {
                         ₹{v}
                       </button>
                     ))}
-                    <button onClick={() => setTendered(order.total)} data-testid="cash-preset-exact"
+                    <button onClick={() => setTendered(due)} data-testid="cash-preset-exact"
                       className="flex-1 py-2 rounded border border-teal-500/30 bg-teal-500/10 text-teal-300 font-mono-pos text-sm">EXACT</button>
                   </div>
                   <div className="mt-5 bg-slate-950 border border-slate-800 rounded-lg p-4 flex items-center justify-between">

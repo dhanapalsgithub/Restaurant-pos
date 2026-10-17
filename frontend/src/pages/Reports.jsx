@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { BarChart3, Download, CalendarDays } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Calendar } from "@/components/ui/calendar";
+import { ReportTabs } from "./MonthlyGst";
 
 const toIso = (d) => { const x = new Date(d); x.setMinutes(x.getMinutes() - x.getTimezoneOffset()); return x.toISOString().slice(0, 10); };
 const today = () => toIso(new Date());
@@ -62,6 +63,7 @@ export default function Reports() {
         <div>
           <div className="text-[11px] uppercase tracking-widest text-teal-400 font-semibold">End of day · GST summary</div>
           <h1 className="font-heading text-2xl font-bold text-white flex items-center gap-2"><BarChart3 className="h-6 w-6" /> Daily Sales Report</h1>
+          <ReportTabs />
         </div>
         <div className="flex items-center gap-2">
           <Popover open={calOpen} onOpenChange={setCalOpen}>
