@@ -1,0 +1,41 @@
+{
+  "summary": "Iteration 4: Split Bills, split payments, table Move/Merge and Monthly GST (plus a regression of plain cash and the daily report). Backend: new test_iter4_split_move_gst.py has 25 tests; with the regression suites, 55 of 55 pass. Covered: equal split exact to the paise, item split (with GST rates and discount), all 400 validations, undo split, per-share cash/card/UPI with the ~12s demo auto-pay, Partial to Paid, table Billed with running_total = amount due, move/merge (qty combined, source held bill removed, open orders moved), monthly JSON (gstin, 29-Karnataka, eco 9(5), SAC 996331, docs), all CSV kinds with exact offline-tool headers, 400 for a bad month, 422 for a bad kind. Frontend (Playwright, demo/demo123): equal split preview, guest stepper with min 2, by-item mode disabled with a warning until every guest has an item, shares list, Collect with share-banner, cash prefilled with the share amount, share marked paid and remaining updated, undo hidden after the first payment, closing with Esc and pressing CHARGE again reopens the same order with its shares kept, the last share by card shows 'Payment received · Split · 2 shares', the cart clears, and undo then a normal cash payment works. Floor: Move/Merge shows only on busy tables, the dialog leaves out the source table and labels targets Move/Merge, moves and merges with toasts, and the floor updates. Monthly GST: tabs, month stepper (next disabled for the current month, prev reloads), all stat cards and 6 tables render, and all 4 CSV downloads have the correct headers. No page errors.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/reports/monthly (docs)", "issue": "Swiggy/Zomato orders share the ORDxxxxx sequence with POS orders. The Documents Issued row shows ORD00001-ORD00025 with Total=19, so the serial range has gaps that do not match the count; an accountant filing GSTR-1 Table 13 will see a mismatch. Unpaid (Pending/Partial) POS orders are also counted as issued invoices. Consider a separate POS invoice series, or listing the aggregator gaps."},
+      {"endpoint": "/api/reports/monthly/csv?kind=b2cs|hsn", "issue": "Rate is written as a float ('5.0'); the GST offline tool expects the rate value from its list ('5'). Write int(rate) when the rate is a whole number."},
+      {"endpoint": "/api/orders/{id}/status", "issue": "A 'Partial' split order (some shares paid) can still be cancelled. Only fully Paid orders are blocked, so money already collected on shares silently drops out of reports."},
+      {"endpoint": "_record_payment (split)", "issue": "The share update filters on splits.id only, not status=Pending. A concurrent webhook or demo auto-pay and a manual pay of the same share can both succeed, which is a race. Add 'splits.status':'Pending' to the filter and check modified_count."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "MonthlyGst.jsx", "issues": ["The api.get in useEffect has no catch. If the request fails, the page stays on 'Loading GST report...' forever with no error toast. download() also has no try/catch.", "Rapid month stepping can let a stale response overwrite newer data (no cancellation or month guard)."]},
+      {"screen": "MoveTableDialog", "issues": ["Merge is irreversible and fires on a single click with no confirmation. Consider a confirm step for the Merge targets."]},
+      {"screen": "POS payment", "issues": ["Toasts still stack 2-3 per payment (e.g. 'Bill split into 2 shares', 'Cash paid', 'Card payment recorded') at the bottom-center over the dialog. Minor."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_iter4_split_move_gst.py", "/app/backend/tests/test_floor_held_reports.py", "/app/backend/tests/test_iter3_fixes.py", "/app/test_reports/pytest/pytest_iter4.xml"],
+  "action_items": [
+    "Optional: use a separate invoice series for POS, or explain the gaps, so Docs Issued from/to matches the total; consider excluding unpaid orders.",
+    "Optional: write whole-number GST rates as integers in the B2CS/HSN CSVs.",
+    "Optional: block cancelling Partial (split, partly paid) orders.",
+    "Optional: make split share payment atomic (filter on splits.status Pending).",
+    "Optional: add error handling to MonthlyGst load and download."
+  ],
+  "critical_code_review_comments": [
+    "Split rounding is correct: the equal-split remainder goes to the first shares and the item-split remainder to the last share; both match order.total exactly.",
+    "The client-side split preview mirrors the server formula; the previews (504/189) matched the server shares.",
+    "A demo auto-pay task started before a split (whole-order UPI) is safely rejected by _resolve_payment ('Bill is split').",
+    "The paid-POS-order cancel guard (new in this iteration) made 2 iteration-2 report tests stale. The seed in test_floor_held_reports.py was updated to cancel an unpaid order instead."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter4_split_move_gst.py", "/app/backend/tests/test_floor_held_reports.py"],
+  "success_rate": {"backend": "100% (55/55)", "frontend": "100% of requested flows"},
+  "seed_data_creation": "The pytest suites register fresh test_<hex> stores (GSTIN 29ABCDE1234F1Z5 for iteration 4). Demo store UI tests created and paid ORD00023 (or later), ORD00024 (split 504 Cash + 189 Card) and one plain cash order. The demo held bill created on T1 was moved to T2, then merged into T7. T7 now holds 2x Dal Makhani + 1x Paneer Tikka plus the existing partial split order (running total ₹1050).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run: REACT_APP_BACKEND_URL=<url> pytest /app/backend/tests -n 0. The system date is Oct 2026. In the demo menu, item index 1 is out of stock, so use items 0 and 2 in Playwright. Split assign testid format: split-assign-<lineIndex>-<unitIndex>-<guestIndex>. Stub window.print with add_init_script."
+}

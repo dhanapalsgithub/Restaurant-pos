@@ -60,17 +60,23 @@ export default function MonthlyGst() {
   const tz = new Date().getTimezoneOffset();
 
   useEffect(() => {
+    let live = true;
     setRep(null);
-    api.get("/reports/monthly", { params: { month, tz_offset: tz } }).then(({ data }) => setRep(data));
+    api.get("/reports/monthly", { params: { month, tz_offset: tz } })
+      .then(({ data }) => { if (live) setRep(data); })
+      .catch((e) => { if (live) { setRep(false); toast.error(e?.response?.data?.detail || "Could not load GST report"); } });
+    return () => { live = false; };
   }, [month, tz]);
 
   const download = async (kind) => {
-    const res = await api.get("/reports/monthly/csv", { params: { month, kind, tz_offset: tz }, responseType: "blob" });
-    const url = URL.createObjectURL(res.data);
-    const a = document.createElement("a");
-    a.href = url; a.download = `gst-${kind}-${month}.csv`; a.click();
-    URL.revokeObjectURL(url);
-    toast.success(`${kind.toUpperCase()} CSV exported`);
+    try {
+      const res = await api.get("/reports/monthly/csv", { params: { month, kind, tz_offset: tz }, responseType: "blob" });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = url; a.download = `gst-${kind}-${month}.csv`; a.click();
+      URL.revokeObjectURL(url);
+      toast.success(`${kind.toUpperCase()} CSV exported`);
+    } catch { toast.error("Export failed"); }
   };
 
   const s = rep?.summary;
@@ -95,7 +101,8 @@ export default function MonthlyGst() {
         </div>
       </div>
 
-      {!rep ? <div className="p-6 text-slate-500">Loading GST report...</div> : (
+      {rep === false ? <div className="p-6 text-rose-400" data-testid="gst-load-error">Could not load the GST report. Try another month or refresh.</div>
+        : !rep ? <div className="p-6 text-slate-500">Loading GST report...</div> : (
         <div className="flex-1 overflow-auto p-6 space-y-5">
           <div className="flex items-center gap-4 text-xs text-slate-400">
             <span>GSTIN <span className="font-mono-pos text-slate-200" data-testid="gst-gstin">{rep.gstin || "— add in Settings"}</span></span>

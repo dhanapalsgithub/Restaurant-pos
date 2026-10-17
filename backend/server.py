@@ -7,6 +7,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ReturnDocument
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any, Literal
 from pathlib import Path
@@ -400,8 +401,8 @@ async def update_status(oid: str, data: StatusUpdateIn, current=Depends(get_curr
     order = await db.orders.find_one({"id": oid, "store_id": current["id"]}, {"_id": 0})
     if not order:
         raise HTTPException(404, "Order not found")
-    if data.order_status == "Cancelled" and order["payment_status"] == "Paid" and order.get("channel") == "POS":
-        raise HTTPException(400, "Paid orders cannot be cancelled")
+    if data.order_status == "Cancelled" and order["payment_status"] in ("Paid", "Partial") and order.get("channel") == "POS":
+        raise HTTPException(400, "Orders with collected payments cannot be cancelled")
     await db.orders.update_one(
         {"id": oid}, {"$set": {"order_status": data.order_status, "updated_at": now_iso()}}
     )
@@ -486,19 +487,35 @@ async def _resolve_payment(oid: str, store_id: str, split_id: Optional[str]):
     return order, None, order["total"]
 
 
+async def _assign_invoice(order_id: str):
+    o = await db.orders.find_one({"id": order_id}, {"_id": 0, "invoice_no": 1, "channel": 1, "store_id": 1})
+    if not o or o.get("invoice_no") or o.get("channel", "POS") in ECO_CHANNELS:
+        return
+    c = await db.counters.find_one_and_update({"_id": f"inv:{o['store_id']}"}, {"$inc": {"seq": 1}},
+                                              upsert=True, return_document=ReturnDocument.AFTER)
+    await db.orders.update_one({"id": order_id, "invoice_no": {"$exists": False}},
+                               {"$set": {"invoice_no": f"INV{c['seq']:06d}"}})
+
+
 async def _record_payment(store_id: str, order: Dict[str, Any], split: Optional[Dict[str, Any]],
                           mode: str, ref: str, payment_id: str = "") -> bool:
     ts = now_iso()
     if not split:
-        await db.orders.update_one({"id": order["id"]}, {"$set": {
+        res = await db.orders.update_one({"id": order["id"], "payment_status": {"$ne": "Paid"}}, {"$set": {
             "payment_mode": mode, "payment_status": "Paid", "payment_ref": ref,
             "gateway_payment_id": payment_id or order.get("gateway_payment_id", ""), "updated_at": ts,
         }})
+        if res.modified_count == 0:
+            raise HTTPException(400, "Order is already paid")
+        await _assign_invoice(order["id"])
         await ws_manager.broadcast(store_id, {"type": "payment_success", "order_id": order["id"], "mode": mode, "payment_id": payment_id})
         return True
-    await db.orders.update_one({"id": order["id"], "splits.id": split["id"]}, {"$set": {
-        "splits.$.status": "Paid", "splits.$.mode": mode, "splits.$.ref": ref, "splits.$.paid_at": ts, "updated_at": ts,
-    }})
+    res = await db.orders.update_one(
+        {"id": order["id"], "splits": {"$elemMatch": {"id": split["id"], "status": "Pending"}}},
+        {"$set": {"splits.$.status": "Paid", "splits.$.mode": mode, "splits.$.ref": ref,
+                  "splits.$.paid_at": ts, "updated_at": ts}})
+    if res.modified_count == 0:
+        raise HTTPException(400, "Share already paid")
     fresh = await db.orders.find_one({"id": order["id"]}, {"_id": 0})
     paid_n = sum(1 for s in fresh["splits"] if s["status"] == "Paid")
     all_paid = paid_n == len(fresh["splits"])
@@ -509,6 +526,7 @@ async def _record_payment(store_id: str, order: Dict[str, Any], split: Optional[
     await ws_manager.broadcast(store_id, {"type": "split_paid", "order_id": order["id"], "split_id": split["id"],
                                           "mode": mode, "all_paid": all_paid})
     if all_paid:
+        await _assign_invoice(order["id"])
         await ws_manager.broadcast(store_id, {"type": "payment_success", "order_id": order["id"], "mode": "Split"})
     return all_paid
 
@@ -1007,6 +1025,10 @@ RESTAURANT_SAC = "996331"
 ECO_CHANNELS = ("Swiggy", "Zomato")
 
 
+def _rate_str(rate: float) -> str:
+    return str(int(rate)) if float(rate).is_integer() else str(rate)
+
+
 def _month_range(month: str, tz_offset: int):
     try:
         d = datetime.strptime(month, "%Y-%m").replace(tzinfo=timezone.utc)
@@ -1046,11 +1068,12 @@ async def _build_monthly(store: Dict[str, Any], month: str, tz_offset: int) -> D
     eco_rows = [{**r, "taxable": round(r["taxable"], 2), "tax": round(r["tax"], 2), "total": round(r["total"], 2)} for r in eco.values()]
     eco_taxable = round(sum(r["taxable"] for r in eco_rows), 2)
 
-    pos_docs = sorted((o for o in orders if o.get("channel", "POS") not in ECO_CHANNELS), key=lambda o: o["order_number"])
-    cancelled = sum(1 for o in pos_docs if o.get("order_status") == "Cancelled")
+    # Each POS invoice number in the month (cancelled bills never get one, so the series has no gaps)
+    pos_docs = sorted((o for o in pos_paid if o.get("invoice_no")), key=lambda o: o["invoice_no"])
     docs = [{"nature": "Invoices for outward supply",
-             "from": pos_docs[0]["order_number"] if pos_docs else "", "to": pos_docs[-1]["order_number"] if pos_docs else "",
-             "total": len(pos_docs), "cancelled": cancelled, "net_issued": len(pos_docs) - cancelled}]
+             "from": pos_docs[0]["invoice_no"] if pos_docs else "", "to": pos_docs[-1]["invoice_no"] if pos_docs else "",
+             "total": len(pos_docs), "cancelled": 0, "net_issued": len(pos_docs)}]
+    cancelled = sum(1 for o in orders if o.get("order_status") == "Cancelled" and o.get("channel", "POS") not in ECO_CHANNELS)
 
     daily: Dict[str, Dict[str, Any]] = {}
     for o in paid:
@@ -1098,13 +1121,13 @@ async def monthly_report_csv(month: str, kind: Literal["full", "b2cs", "hsn", "d
     def b2cs_rows():
         w.writerow(["Type", "Place Of Supply", "Applicable % of Tax Rate", "Rate", "Taxable Value", "Cess Amount", "E-Commerce GSTIN"])
         for r in rep["b2cs"]:
-            w.writerow([r["type"], r["place_of_supply"], "", r["rate"], r["taxable"], r["cess"], ""])
+            w.writerow([r["type"], r["place_of_supply"], "", _rate_str(r["rate"]), r["taxable"], r["cess"], ""])
 
     def hsn_rows():
         w.writerow(["HSN", "Description", "UQC", "Total Quantity", "Total Value", "Rate", "Taxable Value",
                     "Integrated Tax Amount", "Central Tax Amount", "State/UT Tax Amount", "Cess Amount"])
         for r in rep["hsn"]:
-            w.writerow([r["hsn"], r["description"], r["uqc"], r["qty"], r["total_value"], r["rate"], r["taxable"],
+            w.writerow([r["hsn"], r["description"], r["uqc"], r["qty"], r["total_value"], _rate_str(r["rate"]), r["taxable"],
                         r["igst"], r["cgst"], r["sgst"], r["cess"]])
 
     def docs_rows():
@@ -1270,6 +1293,14 @@ async def seed_demo():
         await db.menu_items.insert_one(it.model_dump())
     await _ensure_tables(store.id)
     logger.info("Seeded demo store (user=demo pw=demo123)")
+
+
+@app.on_event("startup")
+async def backfill_invoices():
+    cursor = db.orders.find({"payment_status": "Paid", "channel": "POS", "invoice_no": {"$exists": False}},
+                            {"_id": 0, "id": 1}).sort("created_at", 1)
+    async for o in cursor:
+        await _assign_invoice(o["id"])
 
 
 # ====================== REGISTER ======================

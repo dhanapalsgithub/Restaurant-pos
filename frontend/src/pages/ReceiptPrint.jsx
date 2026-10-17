@@ -12,6 +12,7 @@ export default function ReceiptPrint({ order, store }) {
       </div>
       <hr />
       <div className="row"><span>Bill #</span><span>{order.order_number}</span></div>
+      {order.invoice_no && <div className="row"><span>Invoice #</span><span>{order.invoice_no}</span></div>}
       <div className="row"><span>Type</span><span>{order.order_type}</span></div>
       <div className="row"><span>Date</span><span>{new Date(order.created_at || Date.now()).toLocaleString()}</span></div>
       {order.table_no && <div className="row"><span>Table</span><span>{order.table_no}</span></div>}

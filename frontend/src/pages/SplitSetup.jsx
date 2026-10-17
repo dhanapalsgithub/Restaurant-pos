@@ -65,7 +65,6 @@ export default function SplitSetup({ order, onCreated, onCancel }) {
     setBusy(true);
     try {
       const { data } = await api.post(`/orders/${order.id}/split`, { mode, parts: n, groups: mode === "items" ? groups : [] });
-      toast.success(`Bill split into ${n} shares`);
       onCreated(data);
     } catch (e) { toast.error(e?.response?.data?.detail || "Could not split bill"); }
     finally { setBusy(false); }

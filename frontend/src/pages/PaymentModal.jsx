@@ -123,7 +123,7 @@ export default function PaymentModal({ order, open, onClose, onPaid }) {
     }}>
       <DialogContent className="max-w-3xl bg-slate-900 border-slate-800 text-slate-100 p-0 overflow-hidden">
         <DialogHeader className="px-6 py-4 border-b border-slate-800 bg-slate-950">
-          <DialogTitle className="font-heading text-lg flex items-center justify-between gap-3">
+          <DialogTitle className="font-heading text-lg flex items-center justify-between gap-3 pr-8">
             <span className="flex-1">Checkout · <span className="font-mono-pos text-teal-400">{ord.order_number}</span></span>
             {!hasSplits && !splitSetup && status === "idle" && (
               <button onClick={() => setSplitSetup(true)} data-testid="split-bill-btn"

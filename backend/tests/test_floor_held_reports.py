@@ -133,7 +133,7 @@ class TestReport:
         fresh.post(f"{API}/orders/{b['id']}/pay/card", json={"reference": "TESTREF"})
         fresh.post(f"{API}/orders", json={"order_type": "Takeaway", "items": [line("TEST Tea", 50, 1, 5)]})
         c = fresh.post(f"{API}/orders", json={"order_type": "Takeaway", "items": [line("TEST Junk", 1000, 1, 5)]}).json()
-        fresh.post(f"{API}/orders/{c['id']}/pay/cash", json={"tendered": 1050})
+        # iter4: paid POS orders can no longer be cancelled (400) -> cancel an unpaid one instead
         fresh.put(f"{API}/orders/{c['id']}/status", json={"order_status": "Cancelled"})
         return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 

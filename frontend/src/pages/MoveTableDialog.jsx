@@ -1,5 +1,6 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
 import { ArrowRightLeft, Merge } from "lucide-react";
@@ -11,7 +12,11 @@ const BADGE = {
 };
 
 export default function MoveTableDialog({ source, tables, onClose, onDone }) {
+  const [confirm, setConfirm] = useState(null);
+  useEffect(() => { setConfirm(null); }, [source]);
+
   const go = async (t) => {
+    if (t.status !== "Free" && confirm?.name !== t.name) return setConfirm(t);
     try {
       const { data } = await api.post("/tables/move", { from_table: source.name, to_table: t.name });
       toast.success(data.action === "merged" ? `${source.name} merged into ${t.name}` : `${source.name} moved to ${t.name}`);
@@ -48,6 +53,17 @@ export default function MoveTableDialog({ source, tables, onClose, onDone }) {
             );
           })}
         </div>
+        {confirm && (
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3" data-testid="merge-confirm-bar">
+            <span className="text-sm text-amber-200">Merge <b>{source?.name}</b> into <b>{confirm.name}</b>? Both bills become one. This can't be undone.</span>
+            <div className="flex gap-2 shrink-0">
+              <Button size="sm" variant="outline" onClick={() => setConfirm(null)} data-testid="merge-cancel-btn"
+                className="h-8 border-slate-700 text-slate-300 hover:bg-slate-800">Cancel</Button>
+              <Button size="sm" onClick={() => go(confirm)} data-testid="merge-confirm-btn"
+                className="h-8 bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold">Merge</Button>
+            </div>
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   );
