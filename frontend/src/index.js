@@ -14,6 +14,8 @@ import OnlineOrders from "@/pages/OnlineOrders";
 import MenuManager from "@/pages/MenuManager";
 import OrdersHistory from "@/pages/OrdersHistory";
 import Settings from "@/pages/Settings";
+import TablesFloor from "@/pages/TablesFloor";
+import Reports from "@/pages/Reports";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false } },
@@ -38,6 +40,8 @@ function AppRoutes() {
         <Route path="menu" element={<MenuManager />} />
         <Route path="orders" element={<OrdersHistory />} />
         <Route path="settings" element={<Settings />} />
+        <Route path="tables" element={<TablesFloor />} />
+        <Route path="reports" element={<Reports />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

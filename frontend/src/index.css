@@ -88,9 +88,11 @@ body {
   .thermal-receipt, .thermal-receipt * { visibility: visible; }
   .thermal-receipt {
     position: fixed; left: 0; top: 0; width: 80mm; background: white; color: black;
+    display: block !important;
   }
 }
 .thermal-receipt {
+  display: none;
   font-family: 'JetBrains Mono', monospace;
   background: white; color: black; padding: 8px 10px; width: 80mm;
   font-size: 12px; line-height: 1.35;

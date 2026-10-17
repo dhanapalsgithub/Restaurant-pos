@@ -4,15 +4,17 @@ import { toast } from "sonner";
 import { useAuth } from "@/lib/auth";
 import {
   LayoutDashboard, ShoppingCart, Flame, Boxes, Receipt, Settings as SettingsIcon,
-  LogOut, Volume2, VolumeX, Minus, Square, X, Wifi, WifiOff, Store,
+  LogOut, Volume2, VolumeX, Minus, Square, X, Wifi, WifiOff, Store, LayoutGrid, BarChart3,
 } from "lucide-react";
 
 const navItems = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, testid: "nav-dashboard" },
   { to: "/pos", label: "POS Billing", icon: ShoppingCart, testid: "nav-pos" },
+  { to: "/tables", label: "Table Floor", icon: LayoutGrid, testid: "nav-tables" },
   { to: "/online", label: "Online Orders", icon: Flame, testid: "nav-online" },
   { to: "/menu", label: "Menu & Stock", icon: Boxes, testid: "nav-menu" },
   { to: "/orders", label: "Orders History", icon: Receipt, testid: "nav-orders" },
+  { to: "/reports", label: "Daily Report", icon: BarChart3, testid: "nav-reports" },
   { to: "/settings", label: "Settings", icon: SettingsIcon, testid: "nav-settings" },
 ];
 

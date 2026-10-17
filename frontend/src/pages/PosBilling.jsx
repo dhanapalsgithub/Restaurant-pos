@@ -1,10 +1,14 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Search, Plus, Minus, Trash2, CreditCard, Utensils, ShoppingBag } from "lucide-react";
+import { Search, Plus, Minus, Trash2, CreditCard, Utensils, ShoppingBag, PauseCircle, ListRestart } from "lucide-react";
 import { toast } from "sonner";
 import PaymentModal from "./PaymentModal";
+import HeldOrdersDialog from "./HeldOrdersDialog";
+import ReceiptPrint from "./ReceiptPrint";
 
 const GST = 5;
 
@@ -18,12 +22,59 @@ export default function PosBilling() {
   const [tableNo, setTableNo] = useState("");
   const [payOpen, setPayOpen] = useState(false);
   const [currentOrder, setCurrentOrder] = useState(null);
+  const [heldId, setHeldId] = useState(null);
+  const [heldOpen, setHeldOpen] = useState(false);
+  const [heldCount, setHeldCount] = useState(0);
+  const [tables, setTables] = useState([]);
+  const [lastReceipt, setLastReceipt] = useState(() => JSON.parse(localStorage.getItem("pos_last_receipt") || "null"));
+  const [params, setParams] = useSearchParams();
+  const searchRef = useRef(null);
+  const { store } = useAuth();
 
   const load = async () => {
-    const [c, m] = await Promise.all([api.get("/categories"), api.get("/menu")]);
-    setCategories(c.data); setItems(m.data);
+    const [c, m, t, h] = await Promise.all([api.get("/categories"), api.get("/menu"), api.get("/tables"), api.get("/held-orders")]);
+    setCategories(c.data); setItems(m.data); setTables(t.data); setHeldCount(h.data.length);
   };
   useEffect(() => { load(); }, []);
+
+  const loadHeld = (h) => {
+    setCart(h.items.map((i) => ({ id: i.item_id, name: i.name, price: i.price, qty: i.qty, tax_rate: i.tax_rate })));
+    setOrderType(h.order_type); setTableNo(h.table_no || ""); setHeldId(h.id);
+  };
+
+  useEffect(() => {
+    const t = params.get("table");
+    if (!t) return;
+    setOrderType("Dine-In"); setTableNo(t);
+    api.get("/held-orders").then(({ data }) => {
+      const h = data.find((x) => x.order_type === "Dine-In" && x.table_no === t);
+      if (h) { loadHeld(h); toast(`Running bill for table ${t} loaded`); } else { setCart([]); setHeldId(null); }
+    });
+    setParams({}, { replace: true });
+  }, [params, setParams]);
+
+  const refreshHeld = async () => setHeldCount((await api.get("/held-orders")).data.length);
+  const lines = () => cart.map(({ id, name, qty, price, tax_rate }) => ({ item_id: id, name, qty, price, tax_rate }));
+
+  const holdOrder = async () => {
+    if (cart.length === 0) return toast.error("Cart is empty");
+    const table = orderType === "Dine-In" ? tableNo : "";
+    await api.post("/held-orders", { id: heldId, order_type: orderType, table_no: table, items: lines() });
+    toast.success(table ? `Bill parked on table ${table}` : "Order held");
+    setCart([]); setTableNo(""); setHeldId(null);
+    refreshHeld(); api.get("/tables").then(({ data }) => setTables(data));
+  };
+
+  const recall = (h) => {
+    if (cart.length && heldId !== h.id) return toast.error("Hold or clear the current cart first");
+    loadHeld(h); setHeldOpen(false);
+    toast(`Recalled ${h.table_no ? "table " + h.table_no : "held order"}`);
+  };
+
+  const printLast = () => {
+    if (!lastReceipt) return toast.error("No receipt to reprint");
+    setTimeout(() => window.print(), 50);
+  };
 
   const filtered = useMemo(() => {
     return items.filter((i) => {
@@ -51,16 +102,33 @@ export default function PosBilling() {
 
   const checkout = async () => {
     if (cart.length === 0) return toast.error("Cart is empty");
-    const payload = {
-      order_type: orderType,
-      items: cart.map(({ id, name, qty, price, tax_rate }) => ({ item_id: id, name, qty, price, tax_rate })),
-      table_no: tableNo,
-    };
+    if (currentOrder?.payment_status === "Pending") return setPayOpen(true);
+    const payload = { order_type: orderType, items: lines(), table_no: orderType === "Dine-In" ? tableNo : "" };
     const { data } = await api.post("/orders", payload);
+    if (heldId) { await api.delete(`/held-orders/${heldId}`); setHeldId(null); refreshHeld(); }
     setCurrentOrder(data); setPayOpen(true);
   };
 
-  const onPaid = () => { setCart([]); setTableNo(""); setCurrentOrder(null); toast.success("Order completed · ready for next"); };
+  useEffect(() => { setCurrentOrder(null); }, [cart, orderType, tableNo]);
+
+  const onPaid = (o) => {
+    setCart([]); setTableNo(""); setCurrentOrder(null); setHeldId(null);
+    if (o) { setLastReceipt(o); localStorage.setItem("pos_last_receipt", JSON.stringify(o)); }
+    toast.success("Order completed · ready for next");
+  };
+
+  useEffect(() => {
+    const h = (e) => {
+      if (payOpen || heldOpen) return;
+      if (e.key === "F2") { e.preventDefault(); checkout(); }
+      else if (e.key === "F4") { e.preventDefault(); holdOrder(); }
+      else if (e.key === "F8") { e.preventDefault(); printLast(); }
+      else if (e.key === "F3" || ((e.ctrlKey || e.metaKey) && e.key === "/")) { e.preventDefault(); searchRef.current?.focus(); }
+      else if (e.key === "Escape" && document.activeElement === searchRef.current) { setSearch(""); searchRef.current.blur(); }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  });
 
   return (
     <div className="h-full flex overflow-hidden">
@@ -70,8 +138,8 @@ export default function PosBilling() {
         <div className="p-3 border-b border-slate-800 bg-slate-950 space-y-2">
           <div className="relative">
             <Search className="h-4 w-4 absolute left-3 top-3.5 text-slate-500" />
-            <Input value={search} onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search menu...  [Ctrl + /]" data-testid="pos-search-input"
+            <Input ref={searchRef} value={search} onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search menu...  [F3 / Ctrl + /]" data-testid="pos-search-input"
               className="pl-10 h-11 bg-slate-900 border-slate-800 text-slate-100 font-mono-pos" />
           </div>
           <div className="flex gap-1.5 overflow-x-auto pb-0.5">
@@ -135,10 +203,24 @@ export default function PosBilling() {
               </button>
             ))}
           </div>
-          {orderType === "Dine-In" && (
-            <Input value={tableNo} onChange={(e) => setTableNo(e.target.value)}
-              placeholder="Table #" data-testid="order-table-no"
-              className="h-9 bg-slate-950 border-slate-800 text-slate-100 font-mono-pos" />
+          <div className="flex gap-1.5">
+            {orderType === "Dine-In" && (
+              <select value={tableNo} onChange={(e) => setTableNo(e.target.value)} data-testid="order-table-select"
+                className="flex-1 h-9 rounded-md bg-slate-950 border border-slate-800 text-slate-100 font-mono-pos text-sm px-2 focus:outline-none focus:border-teal-500">
+                <option value="" className="bg-slate-900">No table</option>
+                {tables.map((t) => <option key={t.id} value={t.name} className="bg-slate-900">{t.name} · {t.status}</option>)}
+              </select>
+            )}
+            <button onClick={() => setHeldOpen(true)} data-testid="held-orders-open-btn"
+              className={`h-9 px-3 rounded-md border text-xs font-semibold uppercase tracking-wider flex items-center gap-1.5 transition-colors ${orderType === "Dine-In" ? "" : "flex-1 justify-center"} border-slate-800 bg-slate-950 text-slate-300 hover:border-amber-500/50 hover:text-amber-300`}>
+              <ListRestart className="h-3.5 w-3.5" /> Held
+              <span className="font-mono-pos bg-amber-500/15 text-amber-300 px-1.5 rounded" data-testid="held-count">{heldCount}</span>
+            </button>
+          </div>
+          {heldId && (
+            <div className="text-[10px] text-amber-400 mt-1.5 uppercase tracking-wider font-semibold" data-testid="recalled-indicator">
+              Recalled held bill · F4 to re-park
+            </div>
           )}
         </div>
 
@@ -173,14 +255,27 @@ export default function PosBilling() {
             <span className="text-[11px] uppercase tracking-widest text-slate-400 font-semibold">Total</span>
             <span className="font-mono-pos text-3xl font-extrabold text-teal-400" data-testid="cart-total">₹{total.toFixed(2)}</span>
           </div>
-          <Button onClick={checkout} data-testid="pos-checkout-btn"
-            className="w-full h-12 mt-2 bg-teal-600 hover:bg-teal-500 font-bold tracking-wide">
-            <CreditCard className="h-4 w-4 mr-2" /> CHARGE ₹{total.toFixed(2)}
-          </Button>
+          <div className="flex gap-2 mt-2">
+            <Button onClick={holdOrder} variant="outline" data-testid="pos-hold-btn"
+              className="h-12 px-4 border-amber-500/40 bg-amber-500/5 text-amber-300 hover:bg-amber-500/15 hover:text-amber-200 font-bold tracking-wide">
+              <PauseCircle className="h-4 w-4 mr-1.5" /> HOLD
+            </Button>
+            <Button onClick={checkout} data-testid="pos-checkout-btn"
+              className="flex-1 h-12 bg-teal-600 hover:bg-teal-500 font-bold tracking-wide">
+              <CreditCard className="h-4 w-4 mr-2" /> CHARGE ₹{total.toFixed(2)}
+            </Button>
+          </div>
+          <div className="flex justify-between pt-1.5 text-[10px] font-mono-pos text-slate-500 uppercase tracking-wider" data-testid="shortcut-hints">
+            {[["F2", "Pay"], ["F4", "Hold"], ["F8", "Reprint"], ["F3", "Search"]].map(([k, l]) => (
+              <span key={k}><kbd className="px-1 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-300">{k}</kbd> {l}</span>
+            ))}
+          </div>
         </div>
       </aside>
 
       <PaymentModal order={currentOrder} open={payOpen} onClose={() => setPayOpen(false)} onPaid={onPaid} />
+      <HeldOrdersDialog open={heldOpen} onClose={() => setHeldOpen(false)} onRecall={recall} onChanged={setHeldCount} />
+      {!payOpen && lastReceipt && <ReceiptPrint order={lastReceipt} store={store} />}
     </div>
   );
 }

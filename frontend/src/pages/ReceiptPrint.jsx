@@ -3,7 +3,7 @@ import React from "react";
 export default function ReceiptPrint({ order, store }) {
   if (!order) return null;
   return (
-    <div className="thermal-receipt" style={{ display: "none" }} data-testid="thermal-receipt-print">
+    <div className="thermal-receipt" data-testid="thermal-receipt-print">
       <div className="center">
         <div style={{ fontWeight: 800, fontSize: 14 }}>{store?.store_name || "RESTAURANT"}</div>
         <div>{store?.address}</div>

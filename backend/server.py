@@ -11,7 +11,8 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-import os, logging, uuid, asyncio, hmac, hashlib, json, bcrypt, jwt, base64, io
+from fastapi.responses import Response
+import os, logging, uuid, asyncio, hmac, hashlib, json, bcrypt, jwt, base64, io, csv
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -252,6 +253,7 @@ async def register_store(data: StoreIn):
     doc = store.model_dump()
     doc["password_hash"] = hash_pw(data.password)
     await db.stores.insert_one(doc)
+    await _ensure_tables(store.id)
     return {"id": store.id, "store_name": store.store_name, "username": store.username}
 
 
@@ -586,6 +588,216 @@ async def simulate_online_order(data: dict, current=Depends(get_current_store)):
     return order.model_dump()
 
 
+# ====================== TABLES (FLOOR VIEW) ======================
+class TableIn(BaseModel):
+    name: str
+    seats: int = 4
+
+
+class HeldOrderIn(BaseModel):
+    id: Optional[str] = None
+    order_type: str = "Dine-In"
+    table_no: str = ""
+    label: str = ""
+    items: List[OrderLine]
+
+
+async def _ensure_tables(store_id: str, n: int = 8):
+    if await db.tables.count_documents({"store_id": store_id}) == 0:
+        docs = [{"id": str(uuid.uuid4()), "store_id": store_id, "name": f"T{i}",
+                 "seats": 6 if i % 3 == 0 else 4, "sort_order": i} for i in range(1, n + 1)]
+        await db.tables.insert_many(docs)
+
+
+@api.get("/tables")
+async def list_tables(current=Depends(get_current_store)):
+    sid = current["id"]
+    tables = await db.tables.find({"store_id": sid}, {"_id": 0}).sort("sort_order", 1).to_list(200)
+    held = await db.held_orders.find({"store_id": sid, "order_type": "Dine-In", "table_no": {"$ne": ""}}, {"_id": 0}).to_list(500)
+    pending = await db.orders.find({
+        "store_id": sid, "order_type": "Dine-In", "payment_status": "Pending",
+        "table_no": {"$ne": ""}, "order_status": {"$ne": "Cancelled"},
+    }, {"_id": 0}).to_list(500)
+    for t in tables:
+        h = next((x for x in held if x["table_no"] == t["name"]), None)
+        p = [o for o in pending if o["table_no"] == t["name"]]
+        t["held_order"] = h
+        t["pending_orders"] = p
+        t["status"] = "Billed" if p else ("Occupied" if h else "Free")
+        t["running_total"] = round((h["total"] if h else 0) + sum(o["total"] for o in p), 2)
+        times = [x["created_at"] for x in ([h] if h else []) + p]
+        t["since"] = min(times) if times else None
+    return tables
+
+
+@api.post("/tables")
+async def create_table(data: TableIn, current=Depends(get_current_store)):
+    if await db.tables.find_one({"store_id": current["id"], "name": data.name}):
+        raise HTTPException(400, "Table name already exists")
+    count = await db.tables.count_documents({"store_id": current["id"]})
+    doc = {"id": str(uuid.uuid4()), "store_id": current["id"], "name": data.name,
+           "seats": data.seats, "sort_order": count + 1}
+    await db.tables.insert_one(doc.copy())
+    return doc
+
+
+@api.delete("/tables/{tid}")
+async def delete_table(tid: str, current=Depends(get_current_store)):
+    await db.tables.delete_one({"id": tid, "store_id": current["id"]})
+    return {"ok": True}
+
+
+# ====================== HELD ORDERS ======================
+@api.get("/held-orders")
+async def list_held(current=Depends(get_current_store)):
+    return await db.held_orders.find({"store_id": current["id"]}, {"_id": 0}).sort("updated_at", -1).to_list(500)
+
+
+@api.post("/held-orders")
+async def hold_order(data: HeldOrderIn, current=Depends(get_current_store)):
+    items = [i.model_dump() for i in data.items]
+    if not items:
+        raise HTTPException(400, "Cannot hold an empty order")
+    subtotal, tax, total = await _calc_totals(items)
+    sid = current["id"]
+    existing = None
+    if data.id:
+        existing = await db.held_orders.find_one({"id": data.id, "store_id": sid}, {"_id": 0})
+    if not existing and data.order_type == "Dine-In" and data.table_no:
+        existing = await db.held_orders.find_one({"store_id": sid, "order_type": "Dine-In", "table_no": data.table_no}, {"_id": 0})
+    doc = {
+        "store_id": sid, "order_type": data.order_type,
+        "table_no": data.table_no if data.order_type == "Dine-In" else "",
+        "label": data.label, "items": items,
+        "subtotal": subtotal, "tax": tax, "total": total, "updated_at": now_iso(),
+    }
+    if existing:
+        await db.held_orders.update_one({"id": existing["id"]}, {"$set": doc})
+        doc["id"], doc["created_at"] = existing["id"], existing["created_at"]
+    else:
+        doc["id"], doc["created_at"] = str(uuid.uuid4()), now_iso()
+        await db.held_orders.insert_one(doc.copy())
+    await ws_manager.broadcast(sid, {"type": "held_updated"})
+    return doc
+
+
+@api.delete("/held-orders/{hid}")
+async def delete_held(hid: str, current=Depends(get_current_store)):
+    await db.held_orders.delete_one({"id": hid, "store_id": current["id"]})
+    await ws_manager.broadcast(current["id"], {"type": "held_updated"})
+    return {"ok": True}
+
+
+# ====================== DAILY SALES REPORT ======================
+def _day_range(date_str: str, tz_offset: int):
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise HTTPException(400, "date must be YYYY-MM-DD")
+    start = d + timedelta(minutes=tz_offset)
+    return start.isoformat(), (start + timedelta(days=1)).isoformat()
+
+
+async def _build_report(store_id: str, date: str, tz_offset: int):
+    start, end = _day_range(date, tz_offset)
+    orders = await db.orders.find(
+        {"store_id": store_id, "created_at": {"$gte": start, "$lt": end}}, {"_id": 0}
+    ).sort("created_at", 1).to_list(10000)
+    paid = [o for o in orders if o["payment_status"] == "Paid" and o.get("order_status") != "Cancelled"]
+    pending = [o for o in orders if o["payment_status"] == "Pending" and o.get("order_status") != "Cancelled"]
+
+    gst, items_agg, modes, channels = {}, {}, {}, {}
+    for o in paid:
+        for i in o["items"]:
+            amt = i["price"] * i["qty"]
+            rate = float(i.get("tax_rate", 5.0))
+            g = gst.setdefault(rate, {"rate": rate, "taxable": 0.0, "tax": 0.0})
+            g["taxable"] += amt
+            g["tax"] += amt * rate / 100
+            it = items_agg.setdefault(i["name"], {"name": i["name"], "qty": 0, "amount": 0.0})
+            it["qty"] += i["qty"]
+            it["amount"] += amt
+        m = modes.setdefault(o["payment_mode"], {"mode": o["payment_mode"], "count": 0, "amount": 0.0})
+        m["count"] += 1
+        m["amount"] += o["total"]
+        c = channels.setdefault(o.get("channel", "POS"), {"channel": o.get("channel", "POS"), "count": 0, "amount": 0.0})
+        c["count"] += 1
+        c["amount"] += o["total"]
+
+    gst_rows = [{"rate": g["rate"], "taxable": round(g["taxable"], 2), "cgst": round(g["tax"] / 2, 2),
+                 "sgst": round(g["tax"] / 2, 2), "total_tax": round(g["tax"], 2)}
+                for g in sorted(gst.values(), key=lambda x: x["rate"])]
+    gross = sum(o["total"] for o in paid)
+    total_tax = sum(o["tax"] for o in paid)
+    return {
+        "date": date,
+        "summary": {
+            "gross_sales": round(gross, 2),
+            "taxable_value": round(sum(o["subtotal"] for o in paid), 2),
+            "total_tax": round(total_tax, 2),
+            "cgst": round(total_tax / 2, 2), "sgst": round(total_tax / 2, 2),
+            "discount": round(sum(o.get("discount", 0) for o in paid), 2),
+            "paid_orders": len(paid),
+            "pending_orders": len(pending),
+            "pending_amount": round(sum(o["total"] for o in pending), 2),
+            "avg_ticket": round(gross / len(paid), 2) if paid else 0.0,
+        },
+        "gst_breakdown": gst_rows,
+        "payment_modes": [{**m, "amount": round(m["amount"], 2)} for m in modes.values()],
+        "channels": [{**c, "amount": round(c["amount"], 2)} for c in channels.values()],
+        "top_items": sorted(({**v, "amount": round(v["amount"], 2)} for v in items_agg.values()),
+                            key=lambda x: x["amount"], reverse=True)[:10],
+        "orders": paid + pending,
+    }
+
+
+@api.get("/reports/daily")
+async def daily_report(date: str, tz_offset: int = 0, current=Depends(get_current_store)):
+    rep = await _build_report(current["id"], date, tz_offset)
+    rep["orders"] = [{k: o.get(k) for k in ("id", "order_number", "created_at", "channel", "order_type", "table_no",
+                                            "payment_mode", "payment_status", "subtotal", "tax", "discount", "total")}
+                     for o in rep["orders"]]
+    return rep
+
+
+@api.get("/reports/daily/csv")
+async def daily_report_csv(date: str, tz_offset: int = 0, current=Depends(get_current_store)):
+    rep = await _build_report(current["id"], date, tz_offset)
+    s = rep["summary"]
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Daily Sales Report", current.get("store_name", "")])
+    w.writerow(["GSTIN", current.get("gst_number", "")])
+    w.writerow(["Date", date])
+    w.writerow([])
+    w.writerow(["SUMMARY"])
+    for label, key in [("Gross Sales", "gross_sales"), ("Taxable Value", "taxable_value"), ("CGST", "cgst"),
+                       ("SGST", "sgst"), ("Total GST", "total_tax"), ("Discount", "discount"),
+                       ("Paid Orders", "paid_orders"), ("Pending Orders", "pending_orders"),
+                       ("Pending Amount", "pending_amount"), ("Average Ticket", "avg_ticket")]:
+        w.writerow([label, s[key]])
+    w.writerow([])
+    w.writerow(["GST BREAKDOWN"])
+    w.writerow(["GST Rate %", "Taxable Value", "CGST", "SGST", "Total GST"])
+    for g in rep["gst_breakdown"]:
+        w.writerow([g["rate"], g["taxable"], g["cgst"], g["sgst"], g["total_tax"]])
+    w.writerow([])
+    w.writerow(["PAYMENT MODES"])
+    w.writerow(["Mode", "Orders", "Amount"])
+    for m in rep["payment_modes"]:
+        w.writerow([m["mode"], m["count"], round(m["amount"], 2)])
+    w.writerow([])
+    w.writerow(["ORDERS"])
+    w.writerow(["Order #", "Time (UTC)", "Channel", "Type", "Table", "Payment Mode", "Payment Status",
+                "Subtotal", "CGST", "SGST", "Discount", "Total"])
+    for o in rep["orders"]:
+        w.writerow([o["order_number"], o["created_at"], o.get("channel", ""), o["order_type"], o.get("table_no", ""),
+                    o["payment_mode"], o["payment_status"], o["subtotal"], round(o["tax"] / 2, 2),
+                    round(o["tax"] / 2, 2), o.get("discount", 0), o["total"]])
+    return Response(content=buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="sales-report-{date}.csv"'})
+
+
 # ====================== DASHBOARD ======================
 @api.get("/dashboard")
 async def dashboard(current=Depends(get_current_store)):
@@ -627,8 +839,9 @@ async def ws_endpoint(ws: WebSocket, token: str):
 # ====================== SEED ======================
 @app.on_event("startup")
 async def seed_demo():
-    existing = await db.stores.find_one({"username": "demo"})
+    existing = await db.stores.find_one({"username": "demo"}, {"_id": 0})
     if existing:
+        await _ensure_tables(existing["id"])
         return
     store = Store(
         store_name="Spice Garden Demo", username="demo",
@@ -681,6 +894,7 @@ async def seed_demo():
             price=price, is_veg=is_veg, image_url=img.get(cat_name, ""),
         )
         await db.menu_items.insert_one(it.model_dump())
+    await _ensure_tables(store.id)
     logger.info("Seeded demo store (user=demo pw=demo123)")
 
 
