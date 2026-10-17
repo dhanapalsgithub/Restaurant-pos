@@ -73,7 +73,7 @@ export default function Reports() {
               </button>
             </PopoverTrigger>
             <PopoverContent align="end" className="w-auto p-0 bg-slate-900 border-slate-800 text-slate-100">
-              <Calendar mode="single" selected={new Date(`${date}T00:00:00`)} disabled={{ after: new Date() }}
+              <Calendar mode="single" selected={new Date(`${date}T00:00:00`)} disabled={{ after: new Date() }} toDate={new Date()}
                 onSelect={(d) => { if (d) { setDate(toIso(d)); setCalOpen(false); } }} initialFocus />
             </PopoverContent>
           </Popover>
@@ -115,7 +115,7 @@ export default function Reports() {
             rows={rep.orders.map((o) => [
               <span className="font-mono-pos">{o.order_number}</span>,
               new Date(o.created_at).toLocaleTimeString("en-GB", { hour12: false }),
-              o.channel, `${o.payment_mode} · ${o.payment_status}`, rs(o.subtotal), rs(o.tax), rs(o.total),
+              o.channel, `${o.payment_mode} · ${o.payment_status}`, rs(o.subtotal - (o.discount || 0)), rs(o.tax), rs(o.total),
             ])} />
         </div>
       )}

@@ -54,7 +54,7 @@ root.render(
     <AuthProvider>
       <BrowserRouter>
         <AppRoutes />
-        <Toaster position="bottom-right" theme="dark" richColors closeButton />
+        <Toaster position="bottom-center" theme="dark" richColors closeButton />
       </BrowserRouter>
     </AuthProvider>
   </QueryClientProvider>

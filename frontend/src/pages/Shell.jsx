@@ -49,7 +49,7 @@ export default function Shell() {
           } catch {}
         }
       }
-      if (msg.type === "payment_success") {
+      if (msg.type === "payment_success" && msg.mode === "UPI") {
         toast.success(`Payment received · ${msg.mode}`);
       }
     });

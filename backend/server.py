@@ -399,6 +399,8 @@ async def update_status(oid: str, data: StatusUpdateIn, current=Depends(get_curr
     order = await db.orders.find_one({"id": oid, "store_id": current["id"]}, {"_id": 0})
     if not order:
         raise HTTPException(404, "Order not found")
+    if data.order_status == "Cancelled" and order["payment_status"] == "Paid" and order.get("channel") == "POS":
+        raise HTTPException(400, "Paid orders cannot be cancelled")
     await db.orders.update_one(
         {"id": oid}, {"$set": {"order_status": data.order_status, "updated_at": now_iso()}}
     )

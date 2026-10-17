@@ -27,7 +27,6 @@ export default function PaymentModal({ order, open, onClose, onPaid }) {
     return subscribe((m) => {
       if (m.type === "payment_success" && m.order_id === order?.id) {
         setStatus("paid"); setPaidOrder({ ...order, payment_status: "Paid", payment_mode: m.mode, payment_ref: m.payment_id || "" });
-        toast.success("Payment confirmed via " + m.mode);
       }
     });
   }, [open, order, subscribe]);

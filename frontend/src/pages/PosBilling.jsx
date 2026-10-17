@@ -117,7 +117,6 @@ export default function PosBilling() {
   const onPaid = (o) => {
     setCart([]); setTableNo(""); setCurrentOrder(null); setHeldId(null);
     if (o) { setLastReceipt(o); localStorage.setItem("pos_last_receipt", JSON.stringify(o)); }
-    toast.success("Order completed · ready for next");
   };
 
   useEffect(() => {

@@ -1,0 +1,35 @@
+{
+  "summary": "Retest of the iteration 2 fixes plus a quick regression of hold/recall and the floor flows. Backend: added 22 new tests in test_iter3_fixes.py; with the existing regression suite, 32 of 32 pass. Frontend (Playwright on the public URL, demo/demo123): (1) After a cash payment, closing the dialog with Esc and, separately, with the X button now clears the cart. F2 and CHARGE then show a 'Cart is empty' toast and do not reopen the paid order. (2) The GST label shows 'GST (5%)', 'GST' for mixed rates and 'GST (18%)' correctly. (3) Recalling T2 and switching to T5, which already has a held bill, then pressing F4 is rejected with the toast 'Table T5 already has a held bill'. The cart is kept and no duplicate held bill is created. Re-parking on T2 works. (4) The floor shows '· 2 bills' on a Billed table with 2 pending orders. (5) The Reports date picker is a shadcn Popover + Calendar with no native date input. Future days are disabled, and picking a past date reloads the data and closes the popover. (6) The menu images now match their items. The only open issue: toasts are still at the bottom-right, not bottom-center as claimed, and they cover the HOLD/CHARGE buttons.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/orders/{oid}/status", "issue": "A Paid order can still be set to Cancelled, and the cancelled-but-paid order then drops out of the report silently with no refund record. Pre-existing behaviour; consider a guard or a refund flow."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Global Toaster (src/index.js line 57)", "issues": ["The Toaster is still position='bottom-right', not bottom-center as stated in the review request. On the POS screen, toasts cover the HOLD/CHARGE buttons and the F-key hints in the cart panel."]},
+      {"screen": "POS payment", "issues": ["A single cash payment fires up to 4 stacked toasts ('Cash paid', 'Payment confirmed via Cash', 'Payment received · Cash', 'Order completed'). Consider removing the duplicates, e.g. ignore the WebSocket payment_success when status is already paid."]},
+      {"screen": "Reports", "issues": ["The Orders table 'Taxable' column shows o.subtotal, not subtotal minus discount, so it does not match the Taxable value summary when a discount exists.", "The calendar's next-month arrow stays enabled even though every future date is disabled (cosmetic)."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_iter3_fixes.py", "/app/backend/tests/test_floor_held_reports.py", "/app/test_reports/pytest/pytest_iter3.xml"],
+  "action_items": [
+    "Change <Toaster position> in src/index.js to 'bottom-center' (or top-center) so toasts stop covering the POS HOLD/CHARGE buttons.",
+    "Optional: reduce the duplicate payment toasts; show (subtotal - discount) in the Reports orders 'Taxable' column; block cancelling Paid orders or add a refund flow."
+  ],
+  "critical_code_review_comments": [
+    "PaymentModal onOpenChange correctly calls onPaid when status==='paid'. Fix confirmed.",
+    "_payable_order guard is applied to cash, card and UPI initiate.",
+    "The hold_order clash check is correct, both for an upsert by id and for a move to an occupied table.",
+    "POS cart total is computed on the client without a discount. That is fine today because POS has no discount input, but it will diverge if a POS discount is added."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter3_fixes.py"],
+  "success_rate": {"backend": "100% (32/32)", "frontend": "100% of retested fixes (toast position claim not met)"},
+  "seed_data_creation": "Test stores test_<hex> were registered by the pytest suites. Temporary demo data was cleaned up afterwards: TEST Mocktail 18% menu item (deleted), held bill on T5 (deleted), 2 pending T7 orders (cancelled). The demo store still holds its existing T2 held bill (2x Dal Makhani).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run the backend tests with: REACT_APP_BACKEND_URL=... pytest backend/tests -n 0. All demo menu items are 5% GST, so to test the mixed-GST label, create a temporary 18% item via POST /api/menu. Stub window.print with add_init_script."
+}
