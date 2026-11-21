@@ -203,7 +203,9 @@ class TestMonthly:
         assert round(sm["pos_cgst"] + sm["pos_sgst"], 2) == sm["pos_tax"]
         assert all(h["hsn"] == "996331" for h in d["hsn"])
         assert {b["rate"] for b in d["b2cs"]} == {5.0, 18.0}
-        assert d["docs"][0]["cancelled"] >= 1 and d["docs"][0]["total"] >= 2
+        # iter5: docs row uses INV series; cancelled bills never consume a number
+        assert d["docs"][0]["cancelled"] == 0 and d["docs"][0]["total"] >= 1
+        assert d["docs"][0]["from"].startswith("INV") and sm["cancelled_invoices"] >= 1
         assert d["eco"][0]["operator"] == "Swiggy"
         assert round(sum(x["taxable"] for x in d["b2cs"]), 2) == sm["pos_taxable"]
         assert len(d["gstr3b"]) == 2 and d["gstr3b"][0]["taxable"] == sm["pos_taxable"]

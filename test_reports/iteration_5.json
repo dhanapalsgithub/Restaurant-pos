@@ -1,0 +1,28 @@
+{
+  "summary": "Retest of the iteration-4 minor fixes. Backend: 68/68 pytest pass (13 new in test_iter5_invoice_fixes.py plus the existing suites; the iter4 docs-row assertion was updated to the INV series). Verified: INV###### sequential POS invoice series (cash, card, last split share; cancelled and unpaid orders get none; Zomato orders get none), the monthly docs row (from INV000001, total = count, cancelled = 0, summary.cancelled_invoices >= 1), the demo store backfill (INV000001..INV000015, 15 issued), whole-number rates in the B2CS/HSN CSVs ('5', '18'), the cancel guard (400 for Paid and Partial POS orders; Pending can still be cancelled), and the double-pay guard ('Share already paid' 400; 6 concurrent pays of one share or one order give exactly one 200). Found one remaining race: when two DIFFERENT last shares are paid at the same time, invoice numbers are skipped (5 gaps in 30 runs; the pytest case failed 1 time in 15). UI: MoveTableDialog (a Free target moves at once; a busy target shows merge-confirm-bar, and the API confirmed T4 was still Occupied before confirm; cancel hides the bar; confirm merges, T2 = Rs 504), MonthlyGst (gst-load-error on a 500 with the export button disabled; fast prev/next with a slow stale response shows the correct month's data; a CSV 500 shows an 'Export failed' toast; download works), and ReceiptPrint shows 'Invoice # INV000015' after a cash checkout. The 'Bill split into N shares' toast is removed (code-verified).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/orders/{id}/pay/* ?split_id (_record_payment + _assign_invoice)", "issue": "Paying the last 2 split shares at the same time: both requests see all_paid=True and both call _assign_invoice. Both requests increment db.counters, but only one $set lands, so a number is skipped (reproduced 5 times in 30 runs with /app/backend/tests/race_probe.py). This breaks the 'no gaps' rule for GSTR-1 Docs Issued (to - from + 1 != total). The same race could also let a late 'Partial' write overwrite 'Paid' (not seen in 30 runs)."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": ["/app/backend/tests/test_iter5_invoice_fixes.py", "/app/backend/tests/test_iter4_split_move_gst.py", "/app/backend/tests/race_probe.py", "/app/test_reports/pytest/pytest_iter5.xml"],
+  "action_items": [
+    "Fix the invoice gap race: only the request that actually changes payment_status to Paid should take a number. For example: res = update_one({id, payment_status: {$ne: 'Paid'}, splits: {$not: {$elemMatch: {status: 'Pending'}}}}, {$set: {payment_status: 'Paid'}}), and call _assign_invoice only if res.modified_count == 1. Also, in _assign_invoice, claim the order before incrementing the counter (or set invoice_no with a filter so the counter is incremented only once per order).",
+    "Write the Partial status with a filter on payment_status != 'Paid' so a late Partial write cannot overwrite Paid."
+  ],
+  "critical_code_review_comments": [
+    "_assign_invoice increments the counter before its conditional $set, so any duplicate call skips a number. The early-return check is not atomic.",
+    "The backfill_invoices filter is channel == 'POS', so older orders with no channel field are skipped (_assign_invoice itself defaults to POS). Consider {channel: {$nin: ECO_CHANNELS}}.",
+    "Docs-issued uses orders created in the month, but invoice numbers are assigned at payment time. A bill opened on the last night of a month and paid after midnight is counted in the earlier month. This is low impact.",
+    "server.py is about 1318 lines; consider splitting it into routers (payments, reports, tables)."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter4_split_move_gst.py", "/app/backend/tests/test_iter5_invoice_fixes.py", "/app/backend/tests/race_probe.py"],
+  "success_rate": {"backend": "98% (68/68 in the full run; the concurrent last-two-shares invoice test is flaky because of a real race, failing 1 time in 15)", "frontend": "100%"},
+  "flaky_tests": ["test_iter5_invoice_fixes.py::TestDoublePay::test_concurrent_last_two_shares_no_gap - about 7-17% failure rate, caused by a real backend race"],
+  "seed_data_creation": "Test stores test_<hex> are registered for each run. On the demo store, a cash Takeaway order was paid (INV000015). Held orders on T1/T4 were moved/merged into T2, and the T2 held order was then deleted.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run: REACT_APP_BACKEND_URL=<url> pytest /app/backend/tests -n 0. Run python /app/backend/tests/race_probe.py to check for invoice gaps from concurrent split-share payments (expect 'gaps at: []' after the fix). The system date is Oct 2026. Stub window.print with add_init_script. In the demo store, T7 has a Billed order (Rs 1050)."
+}

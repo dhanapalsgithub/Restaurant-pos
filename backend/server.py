@@ -491,10 +491,12 @@ async def _assign_invoice(order_id: str):
     o = await db.orders.find_one({"id": order_id}, {"_id": 0, "invoice_no": 1, "channel": 1, "store_id": 1})
     if not o or o.get("invoice_no") or o.get("channel", "POS") in ECO_CHANNELS:
         return
+    claim = await db.orders.update_one({"id": order_id, "invoice_no": {"$exists": False}}, {"$set": {"invoice_no": ""}})
+    if claim.modified_count == 0:
+        return
     c = await db.counters.find_one_and_update({"_id": f"inv:{o['store_id']}"}, {"$inc": {"seq": 1}},
                                               upsert=True, return_document=ReturnDocument.AFTER)
-    await db.orders.update_one({"id": order_id, "invoice_no": {"$exists": False}},
-                               {"$set": {"invoice_no": f"INV{c['seq']:06d}"}})
+    await db.orders.update_one({"id": order_id}, {"$set": {"invoice_no": f"INV{c['seq']:06d}"}})
 
 
 async def _record_payment(store_id: str, order: Dict[str, Any], split: Optional[Dict[str, Any]],
@@ -519,7 +521,8 @@ async def _record_payment(store_id: str, order: Dict[str, Any], split: Optional[
     fresh = await db.orders.find_one({"id": order["id"]}, {"_id": 0})
     paid_n = sum(1 for s in fresh["splits"] if s["status"] == "Paid")
     all_paid = paid_n == len(fresh["splits"])
-    await db.orders.update_one({"id": order["id"]}, {"$set": {
+    status_filter = {"id": order["id"]} if all_paid else {"id": order["id"], "payment_status": {"$ne": "Paid"}}
+    await db.orders.update_one(status_filter, {"$set": {
         "payment_status": "Paid" if all_paid else "Partial",
         "payment_ref": f"{paid_n}/{len(fresh['splits'])} shares paid",
     }})
