@@ -79,11 +79,25 @@ class Category(BaseModel):
     store_id: str
     name: str
     sort_order: int = 0
+    icon: str = "utensils"
+    color: str = "teal"
 
 
 class CategoryIn(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=60)
     sort_order: int = 0
+    icon: str = "utensils"
+    color: str = "teal"
+
+
+class ModifierOption(BaseModel):
+    label: str = Field(min_length=1, max_length=40)
+    price: float = 0.0
+
+
+class Modifier(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    options: List[ModifierOption] = Field(min_length=1)
 
 
 class MenuItem(BaseModel):
@@ -98,6 +112,10 @@ class MenuItem(BaseModel):
     image_url: str = ""
     is_available: bool = True
     is_veg: bool = True
+    track_stock: bool = False
+    stock_qty: float = 0
+    low_stock_threshold: float = 10
+    modifiers: List[Dict[str, Any]] = []
 
 
 class MenuItemIn(BaseModel):
@@ -109,6 +127,10 @@ class MenuItemIn(BaseModel):
     image_url: str = ""
     is_available: bool = True
     is_veg: bool = True
+    track_stock: bool = False
+    stock_qty: float = Field(default=0, ge=0)
+    low_stock_threshold: float = Field(default=10, ge=0)
+    modifiers: List[Modifier] = []
 
 
 class OrderLine(BaseModel):
@@ -149,6 +171,16 @@ class Order(BaseModel):
     gateway_payment_id: str = ""
     order_status: str = "Placed"  # Placed | Accepted | Preparing | Ready | Dispatched | Completed | Cancelled
     splits: List[Dict[str, Any]] = []
+    platform_order_id: str = ""
+    gross_order_amount: float = 0.0
+    commission_base: str = ""
+    commission_percent: float = 0.0
+    commission_amount: float = 0.0
+    gst_on_commission_percent: float = 0.0
+    gst_on_commission: float = 0.0
+    discount_borne_by_restaurant: float = 0.0
+    tds_tcs_deduction: float = 0.0
+    net_receivable_amount: float = 0.0
     table_no: str = ""
     customer_name: str = ""
     customer_phone: str = ""
@@ -289,13 +321,90 @@ async def me(current=Depends(get_current_store)):
     return current
 
 
+class AggregatorCfg(BaseModel):
+    commission_percent: float = Field(default=20.0, ge=0, le=100)
+    gst_on_commission_percent: float = Field(default=18.0, ge=0, le=100)
+    commission_base: Literal["subtotal", "gross"] = "subtotal"
+    tds_tcs_percent: float = Field(default=0.0, ge=0, le=100)
+
+
+AGG_PLATFORMS = ("Swiggy", "Zomato")
+BUSINESS_TYPES = ("Restaurant", "Tea Shop", "Juice Stall", "Bakery")
+
+
 @api.put("/stores/me")
 async def update_store(data: dict, current=Depends(get_current_store)):
     allowed = {"store_name", "address", "phone", "gst_number", "urbanpiper_store_id",
                "urbanpiper_api_key", "razorpay_key_id", "razorpay_key_secret", "upi_vpa"}
     upd = {k: v for k, v in data.items() if k in allowed}
+    if "business_type" in data:
+        if data["business_type"] not in BUSINESS_TYPES:
+            raise HTTPException(400, "Invalid business type")
+        upd["business_type"] = data["business_type"]
+    if "aggregator_settings" in data:
+        try:
+            upd["aggregator_settings"] = {p: AggregatorCfg(**(data["aggregator_settings"] or {}).get(p, {})).model_dump()
+                                          for p in AGG_PLATFORMS}
+        except Exception:
+            raise HTTPException(422, "Invalid aggregator settings")
     await db.stores.update_one({"id": current["id"]}, {"$set": upd})
     return {"ok": True}
+
+
+# ====================== AGGREGATOR COMMISSION ======================
+def _agg_settings(store: Dict[str, Any], channel: str) -> Dict[str, Any]:
+    return AggregatorCfg(**(store.get("aggregator_settings") or {}).get(channel, {})).model_dump()
+
+
+def _agg_calc(order: Dict[str, Any], cfg: Dict[str, Any], discount_borne: float = 0.0,
+              tds: Optional[float] = None) -> Dict[str, Any]:
+    gross = order["total"]
+    taxable = order["subtotal"] - order.get("discount", 0)
+    base = gross if cfg["commission_base"] == "gross" else taxable
+    commission = round(base * cfg["commission_percent"] / 100, 2)
+    gst_c = round(commission * cfg["gst_on_commission_percent"] / 100, 2)
+    tds_amt = round(taxable * cfg.get("tds_tcs_percent", 0) / 100, 2) if tds is None else round(tds, 2)
+    return {
+        "gross_order_amount": round(gross, 2), "commission_base": cfg["commission_base"],
+        "commission_percent": cfg["commission_percent"], "commission_amount": commission,
+        "gst_on_commission_percent": cfg["gst_on_commission_percent"], "gst_on_commission": gst_c,
+        "discount_borne_by_restaurant": round(discount_borne, 2), "tds_tcs_deduction": tds_amt,
+        "net_receivable_amount": round(gross - commission - gst_c - discount_borne - tds_amt, 2),
+    }
+
+
+def _with_agg(order: Dict[str, Any], store: Dict[str, Any]) -> Dict[str, Any]:
+    if order.get("commission_base"):
+        return order
+    return {**order, **_agg_calc(order, _agg_settings(store, order["channel"]))}
+
+
+class AggUpdateIn(BaseModel):
+    commission_percent: Optional[float] = Field(default=None, ge=0, le=100)
+    gst_on_commission_percent: Optional[float] = Field(default=None, ge=0, le=100)
+    commission_base: Optional[Literal["subtotal", "gross"]] = None
+    discount_borne_by_restaurant: Optional[float] = Field(default=None, ge=0)
+    tds_tcs_deduction: Optional[float] = Field(default=None, ge=0)
+
+
+@api.put("/orders/{oid}/aggregator")
+async def update_aggregator(oid: str, data: AggUpdateIn, current=Depends(get_current_store)):
+    order = await db.orders.find_one({"id": oid, "store_id": current["id"]}, {"_id": 0})
+    if not order:
+        raise HTTPException(404, "Order not found")
+    if order.get("channel") not in AGG_PLATFORMS:
+        raise HTTPException(400, "Only Swiggy/Zomato orders have commission")
+    cur = _with_agg(order, current)
+    cfg = {"commission_percent": cur["commission_percent"], "gst_on_commission_percent": cur["gst_on_commission_percent"],
+           "commission_base": cur["commission_base"]}
+    cfg.update({k: v for k, v in data.model_dump().items() if v is not None and k in cfg})
+    discount = data.discount_borne_by_restaurant if data.discount_borne_by_restaurant is not None else cur["discount_borne_by_restaurant"]
+    tds = data.tds_tcs_deduction if data.tds_tcs_deduction is not None else cur["tds_tcs_deduction"]
+    calc = _agg_calc(order, cfg, discount, tds)
+    if calc["net_receivable_amount"] < 0:
+        raise HTTPException(400, "Deductions exceed the order amount")
+    await db.orders.update_one({"id": oid}, {"$set": {**calc, "updated_at": now_iso()}})
+    return {**order, **calc}
 
 
 # ====================== ROUTES: CATEGORIES ======================
@@ -335,8 +444,17 @@ async def create_item(data: MenuItemIn, current=Depends(get_current_store)):
 
 @api.put("/menu/{iid}")
 async def update_item(iid: str, data: dict, current=Depends(get_current_store)):
-    allowed = {"name", "description", "price", "tax_rate", "image_url", "is_available", "is_veg", "category_id"}
+    allowed = {"name", "description", "price", "tax_rate", "image_url", "is_available", "is_veg", "category_id",
+               "track_stock", "stock_qty", "low_stock_threshold"}
     upd = {k: v for k, v in data.items() if k in allowed}
+    if "modifiers" in data:
+        try:
+            upd["modifiers"] = [Modifier(**m).model_dump() for m in data["modifiers"] or []]
+        except Exception:
+            raise HTTPException(422, "Invalid item options")
+    for k in ("stock_qty", "low_stock_threshold", "price"):
+        if k in upd and (not isinstance(upd[k], (int, float)) or upd[k] < 0):
+            raise HTTPException(422, f"{k} must be a non-negative number")
     await db.menu_items.update_one({"id": iid, "store_id": current["id"]}, {"$set": upd})
     return {"ok": True}
 
@@ -380,6 +498,9 @@ async def get_order(oid: str, current=Depends(get_current_store)):
 @api.post("/orders")
 async def create_order(data: OrderIn, current=Depends(get_current_store)):
     items_dicts = [i.model_dump() for i in data.items]
+    if not items_dicts:
+        raise HTTPException(400, "Order has no items")
+    await _check_stock(current["id"], items_dicts)
     subtotal, tax, total = await _calc_totals(items_dicts, data.discount)
     order = Order(
         store_id=current["id"],
@@ -392,8 +513,59 @@ async def create_order(data: OrderIn, current=Depends(get_current_store)):
         customer_phone=data.customer_phone or "", notes=data.notes or "",
     )
     await db.orders.insert_one(order.model_dump())
+    await _adjust_stock(current["id"], items_dicts, -1)
     await ws_manager.broadcast(current["id"], {"type": "order_created", "order": order.model_dump()})
     return order.model_dump()
+
+
+async def _check_stock(store_id: str, lines: List[Dict[str, Any]]):
+    need: Dict[str, float] = {}
+    for ln in lines:
+        need[ln["item_id"]] = need.get(ln["item_id"], 0) + ln["qty"]
+    tracked = await db.menu_items.find({"store_id": store_id, "id": {"$in": list(need)}, "track_stock": True},
+                                       {"_id": 0, "id": 1, "name": 1, "stock_qty": 1}).to_list(500)
+    for it in tracked:
+        if it["stock_qty"] < need[it["id"]]:
+            raise HTTPException(400, f"Only {int(it['stock_qty'])} {it['name']} left in stock")
+
+
+async def _adjust_stock(store_id: str, lines: List[Dict[str, Any]], sign: int):
+    changed = False
+    for ln in lines:
+        it = await db.menu_items.find_one_and_update(
+            {"store_id": store_id, "id": ln["item_id"], "track_stock": True},
+            {"$inc": {"stock_qty": sign * ln["qty"]}}, return_document=ReturnDocument.AFTER, projection={"_id": 0})
+        if not it:
+            continue
+        changed = True
+        if it["stock_qty"] <= 0:
+            await db.menu_items.update_one({"id": it["id"]}, {"$set": {"stock_qty": 0, "is_available": False}})
+        elif sign > 0 and not it["is_available"]:
+            await db.menu_items.update_one({"id": it["id"]}, {"$set": {"is_available": True}})
+    if changed:
+        await ws_manager.broadcast(store_id, {"type": "stock_updated"})
+
+
+class StockIn(BaseModel):
+    mode: Literal["set", "add"] = "set"
+    qty: float = Field(ge=0)
+
+
+@api.post("/menu/{iid}/stock")
+async def set_stock(iid: str, data: StockIn, current=Depends(get_current_store)):
+    item = await db.menu_items.find_one({"id": iid, "store_id": current["id"]}, {"_id": 0})
+    if not item:
+        raise HTTPException(404, "Item not found")
+    qty = data.qty if data.mode == "set" else item.get("stock_qty", 0) + data.qty
+    await db.menu_items.update_one({"id": iid}, {"$set": {"stock_qty": qty, "track_stock": True, "is_available": qty > 0}})
+    await ws_manager.broadcast(current["id"], {"type": "stock_updated"})
+    return {"ok": True, "stock_qty": qty, "is_available": qty > 0}
+
+
+@api.get("/inventory/low")
+async def low_stock(current=Depends(get_current_store)):
+    items = await db.menu_items.find({"store_id": current["id"], "track_stock": True}, {"_id": 0}).to_list(2000)
+    return [i for i in items if i.get("stock_qty", 0) <= i.get("low_stock_threshold", 10)]
 
 
 @api.put("/orders/{oid}/status")
@@ -403,9 +575,11 @@ async def update_status(oid: str, data: StatusUpdateIn, current=Depends(get_curr
         raise HTTPException(404, "Order not found")
     if data.order_status == "Cancelled" and order["payment_status"] in ("Paid", "Partial") and order.get("channel") == "POS":
         raise HTTPException(400, "Orders with collected payments cannot be cancelled")
-    await db.orders.update_one(
-        {"id": oid}, {"$set": {"order_status": data.order_status, "updated_at": now_iso()}}
+    res = await db.orders.update_one(
+        {"id": oid, "order_status": {"$ne": "Cancelled"}}, {"$set": {"order_status": data.order_status, "updated_at": now_iso()}}
     )
+    if data.order_status == "Cancelled" and res.modified_count and order.get("channel", "POS") == "POS":
+        await _adjust_stock(current["id"], order["items"], 1)
     # UrbanPiper sync for Swiggy/Zomato
     if order.get("channel") in ("Swiggy", "Zomato"):
         logger.info(f"[UrbanPiper SYNC] order={oid} status={data.order_status}")
@@ -688,10 +862,13 @@ async def urbanpiper_webhook(request: Request):
         payment_mode="Online", payment_status=payload.get("payment_status", "Paid"),
         order_status="Placed", customer_name=payload.get("customer_name", ""),
         customer_phone=payload.get("customer_phone", ""), notes=payload.get("notes", ""),
+        platform_order_id=str(payload.get("order_id", "")),
     )
-    await db.orders.insert_one(order.model_dump())
+    doc = {**order.model_dump(), **_agg_calc(order.model_dump(), _agg_settings(store, channel),
+                                              float(payload.get("discount_borne_by_restaurant", 0) or 0))}
+    await db.orders.insert_one(doc.copy())
     await ws_manager.broadcast(store["id"], {
-        "type": "online_order", "order": order.model_dump(), "channel": channel,
+        "type": "online_order", "order": doc, "channel": channel,
     })
     return {"ok": True, "order_id": order.id}
 
@@ -711,12 +888,15 @@ async def simulate_online_order(data: dict, current=Depends(get_current_store)):
         payment_mode="Online", payment_status="Paid", order_status="Placed",
         customer_name=data.get("customer_name", "Online Customer"),
         customer_phone=data.get("customer_phone", "9999999999"),
+        platform_order_id=f"{channel[:3].upper()}-{uuid.uuid4().int % 10**8:08d}",
     )
-    await db.orders.insert_one(order.model_dump())
+    doc = {**order.model_dump(), **_agg_calc(order.model_dump(), _agg_settings(current, channel),
+                                              float(data.get("discount_borne_by_restaurant", 0) or 0))}
+    await db.orders.insert_one(doc.copy())
     await ws_manager.broadcast(current["id"], {
-        "type": "online_order", "order": order.model_dump(), "channel": channel,
+        "type": "online_order", "order": doc, "channel": channel,
     })
-    return order.model_dump()
+    return doc
 
 
 # ====================== TABLES (FLOOR VIEW) ======================
@@ -950,6 +1130,7 @@ def _aggregate(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
             "pending_orders": len(pending),
             "pending_amount": round(sum(_due(o) for o in pending), 2),
             "avg_ticket": round(gross / len(paid), 2) if paid else 0.0,
+            "items_sold": sum(i["qty"] for o in paid for i in o["items"]),
         },
         "gst_breakdown": _gst_by_rate(paid),
         "payment_modes": list(modes.values()),
@@ -1186,6 +1367,182 @@ async def monthly_report_csv(month: str, kind: Literal["full", "b2cs", "hsn", "d
     name = f"gst-{kind}-{month}.csv"
     return Response(content=buf.getvalue(), media_type="text/csv",
                     headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+# ====================== QUICK COUNTER MENU PACK ======================
+_SUGAR = {"name": "Sugar", "options": [{"label": "Normal", "price": 0}, {"label": "Less", "price": 0}, {"label": "No Sugar", "price": 0}]}
+_TEA = [{"name": "Strength", "options": [{"label": "Normal", "price": 0}, {"label": "Strong", "price": 2}]}, _SUGAR]
+_JUICE = [{"name": "Ice", "options": [{"label": "With Ice", "price": 0}, {"label": "Without Ice", "price": 0}]},
+          {"name": "Add-on", "options": [{"label": "None", "price": 0}, {"label": "Extra Milk", "price": 10}]}]
+_SHAKE = [{"name": "Add-on", "options": [{"label": "None", "price": 0}, {"label": "Extra Milk", "price": 10},
+                                         {"label": "Ice Cream", "price": 20}]}]
+QUICK_PACK = [
+    ("Hot Beverages (Tea/Coffee)", "coffee", "amber", False, [
+        ("Tea", 15, _TEA), ("Masala Tea", 20, _TEA), ("Ginger Tea", 20, _TEA),
+        ("Filter Coffee", 25, [_SUGAR]), ("Black Coffee", 20, [_SUGAR]), ("Badam Milk", 30, [_SUGAR])]),
+    ("Juices & Shakes", "cup-soda", "lime", False, [
+        ("Fresh Lime Juice", 30, _JUICE), ("Watermelon Juice", 40, _JUICE), ("Mosambi Juice", 50, _JUICE),
+        ("Mango Shake", 70, _SHAKE), ("Chocolate Shake", 80, _SHAKE)]),
+    ("Bakery & Buns", "croissant", "orange", True, [
+        ("Bun Butter Jam", 30, []), ("Cream Bun", 20, []), ("Osmania Biscuit (2 pcs)", 10, []),
+        ("Plum Cake Slice", 25, []), ("Rusk Pack", 30, [])]),
+    ("Hot Snacks (Puffs/Samosa/Bajji)", "flame", "rose", True, [
+        ("Veg Puff", 20, []), ("Egg Puff", 25, []), ("Samosa", 15, []), ("Mirchi Bajji", 15, []),
+        ("Onion Pakoda", 30, []), ("Vada Pav", 25, [])]),
+]
+
+
+@api.post("/menu/quick-pack")
+async def add_quick_pack(current=Depends(get_current_store)):
+    sid = current["id"]
+    existing = {c["name"] for c in await db.categories.find({"store_id": sid}, {"_id": 0, "name": 1}).to_list(500)}
+    order = await db.categories.count_documents({"store_id": sid})
+    added = 0
+    for name, icon, color, track, items in QUICK_PACK:
+        if name in existing:
+            continue
+        order += 1
+        cat = Category(store_id=sid, name=name, icon=icon, color=color, sort_order=order)
+        await db.categories.insert_one(cat.model_dump())
+        for iname, price, mods in items:
+            it = MenuItem(store_id=sid, category_id=cat.id, name=iname, price=price, modifiers=mods,
+                          track_stock=track, stock_qty=50 if track else 0, low_stock_threshold=10)
+            await db.menu_items.insert_one(it.model_dump())
+            added += 1
+    return {"ok": True, "items_added": added}
+
+
+@api.put("/categories/{cid}")
+async def update_category(cid: str, data: CategoryIn, current=Depends(get_current_store)):
+    res = await db.categories.update_one({"id": cid, "store_id": current["id"]}, {"$set": data.model_dump()})
+    if res.matched_count == 0:
+        raise HTTPException(404, "Category not found")
+    return {"ok": True}
+
+
+# ====================== AGGREGATOR PAYOUTS & RECONCILIATION ======================
+class PayoutIn(BaseModel):
+    date: str
+    platform: Literal["Swiggy", "Zomato"]
+    amount: float
+    order_ref: str = ""
+    reference: str = ""
+
+
+class PayoutBulkIn(BaseModel):
+    rows: List[PayoutIn] = Field(min_length=1, max_length=5000)
+
+
+def _check_date(d: str) -> str:
+    try:
+        return datetime.strptime(d.strip(), "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        raise HTTPException(400, f"Invalid date '{d}' (use YYYY-MM-DD)")
+
+
+def _payout_doc(store_id: str, p: PayoutIn) -> Dict[str, Any]:
+    return {"id": str(uuid.uuid4()), "store_id": store_id, "date": _check_date(p.date), "platform": p.platform,
+            "amount": round(p.amount, 2), "order_ref": p.order_ref.strip(), "reference": p.reference.strip(),
+            "created_at": now_iso()}
+
+
+@api.get("/payouts")
+async def list_payouts(start: str, end: str, current=Depends(get_current_store)):
+    return await db.payouts.find({"store_id": current["id"], "date": {"$gte": _check_date(start), "$lte": _check_date(end)}},
+                                 {"_id": 0}).sort("date", -1).to_list(5000)
+
+
+@api.post("/payouts")
+async def add_payout(data: PayoutIn, current=Depends(get_current_store)):
+    doc = _payout_doc(current["id"], data)
+    await db.payouts.insert_one(doc.copy())
+    return doc
+
+
+@api.post("/payouts/bulk")
+async def add_payouts_bulk(data: PayoutBulkIn, current=Depends(get_current_store)):
+    docs = [_payout_doc(current["id"], r) for r in data.rows]
+    await db.payouts.insert_many([d.copy() for d in docs])
+    return {"ok": True, "inserted": len(docs)}
+
+
+@api.delete("/payouts/{pid}")
+async def delete_payout(pid: str, current=Depends(get_current_store)):
+    res = await db.payouts.delete_one({"id": pid, "store_id": current["id"]})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Payout not found")
+    return {"ok": True}
+
+
+async def _build_recon(store: Dict[str, Any], start: str, end: str, tz_offset: int) -> Dict[str, Any]:
+    s, _ = _day_range(_check_date(start), tz_offset)
+    _, e = _day_range(_check_date(end), tz_offset)
+    orders = await db.orders.find({"store_id": store["id"], "channel": {"$in": list(AGG_PLATFORMS)},
+                                   "order_status": {"$ne": "Cancelled"}, "created_at": {"$gte": s, "$lt": e}},
+                                  {"_id": 0}).sort("created_at", 1).to_list(20000)
+    orders = [_with_agg(o, store) for o in orders]
+    payouts = await db.payouts.find({"store_id": store["id"], "date": {"$gte": _check_date(start), "$lte": _check_date(end)}},
+                                    {"_id": 0}).sort("date", 1).to_list(20000)
+    by_ref: Dict[str, float] = {}
+    for p in payouts:
+        if p["order_ref"]:
+            by_ref[p["order_ref"]] = by_ref.get(p["order_ref"], 0) + p["amount"]
+    keys = ("gross_order_amount", "commission_amount", "gst_on_commission", "discount_borne_by_restaurant",
+            "tds_tcs_deduction", "net_receivable_amount")
+    plats = {p: {"platform": p, "orders": 0, **{k: 0.0 for k in keys}, "actual_received": 0.0} for p in AGG_PLATFORMS}
+    rows = []
+    for o in orders:
+        r = plats[o["channel"]]
+        r["orders"] += 1
+        for k in keys:
+            r[k] += o[k]
+        got = by_ref.get(o.get("platform_order_id") or "\0", by_ref.get(o["order_number"]))
+        diff = None if got is None else round(got - o["net_receivable_amount"], 2)
+        state = "Unsettled" if got is None else ("Matched" if abs(diff) < 1 else ("Short" if diff < 0 else "Excess"))
+        rows.append({"id": o["id"], "order_number": o["order_number"], "platform_order_id": o.get("platform_order_id", ""),
+                     "created_at": o["created_at"], "platform": o["channel"],
+                     **{k: o[k] for k in keys}, "received": got, "difference": diff, "status": state})
+    for p in payouts:
+        plats[p["platform"]]["actual_received"] += p["amount"]
+    summary = []
+    for r in plats.values():
+        r = {k: (round(v, 2) if isinstance(v, float) else v) for k, v in r.items()}
+        r["total_deductions"] = round(r["commission_amount"] + r["gst_on_commission"] + r["discount_borne_by_restaurant"] + r["tds_tcs_deduction"], 2)
+        r["difference"] = round(r["actual_received"] - r["net_receivable_amount"], 2)
+        summary.append(r)
+    tot = {k: round(sum(r[k] for r in summary), 2) for k in ("orders", *keys, "actual_received", "total_deductions", "difference")}
+    return {"start": start, "end": end, "platforms": summary, "totals": tot, "orders": rows, "payouts": payouts}
+
+
+@api.get("/reports/reconciliation")
+async def recon_report(start: str, end: str, tz_offset: int = 0, current=Depends(get_current_store)):
+    return await _build_recon(current, start, end, tz_offset)
+
+
+@api.get("/reports/reconciliation/csv")
+async def recon_csv(start: str, end: str, tz_offset: int = 0, current=Depends(get_current_store)):
+    rep = await _build_recon(current, start, end, tz_offset)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Aggregator Payout Reconciliation", current.get("store_name", ""), f"{start} to {end}"])
+    w.writerow([])
+    head = ["Platform", "Orders", "Gross Sales", "Commission", "GST on Commission", "Restaurant Discount",
+            "TDS/TCS", "Total Deductions", "Expected Net Payout", "Actual Received", "Difference"]
+    w.writerow(head)
+    for r in rep["platforms"] + [{**rep["totals"], "platform": "TOTAL"}]:
+        w.writerow([r["platform"], r["orders"], r["gross_order_amount"], r["commission_amount"], r["gst_on_commission"],
+                    r["discount_borne_by_restaurant"], r["tds_tcs_deduction"], r["total_deductions"],
+                    r["net_receivable_amount"], r["actual_received"], r["difference"]])
+    w.writerow([])
+    w.writerow(["Order #", "Platform Order ID", "Platform", "Date (UTC)", "Gross", "Commission", "GST on Commission",
+                "Discount", "TDS/TCS", "Expected Net", "Received", "Difference", "Status"])
+    for o in rep["orders"]:
+        w.writerow([o["order_number"], o["platform_order_id"], o["platform"], o["created_at"], o["gross_order_amount"],
+                    o["commission_amount"], o["gst_on_commission"], o["discount_borne_by_restaurant"], o["tds_tcs_deduction"],
+                    o["net_receivable_amount"], "" if o["received"] is None else o["received"],
+                    "" if o["difference"] is None else o["difference"], o["status"]])
+    return Response(content=buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="payout-reconciliation-{start}-to-{end}.csv"'})
 
 
 # ====================== DASHBOARD ======================

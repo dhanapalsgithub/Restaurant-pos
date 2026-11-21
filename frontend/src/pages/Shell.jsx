@@ -4,12 +4,14 @@ import { toast } from "sonner";
 import { useAuth } from "@/lib/auth";
 import {
   LayoutDashboard, ShoppingCart, Flame, Boxes, Receipt, Settings as SettingsIcon,
-  LogOut, Volume2, VolumeX, Minus, Square, X, Wifi, WifiOff, Store, LayoutGrid, BarChart3,
+  LogOut, Volume2, VolumeX, Minus, Square, X, Wifi, WifiOff, Store, LayoutGrid, BarChart3, Zap,
 } from "lucide-react";
+import PrinterChip from "./PrinterChip";
 
 const navItems = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, testid: "nav-dashboard" },
   { to: "/pos", label: "POS Billing", icon: ShoppingCart, testid: "nav-pos" },
+  { to: "/quick", label: "Quick Counter", icon: Zap, testid: "nav-quick" },
   { to: "/tables", label: "Table Floor", icon: LayoutGrid, testid: "nav-tables" },
   { to: "/online", label: "Online Orders", icon: Flame, testid: "nav-online" },
   { to: "/menu", label: "Menu & Stock", icon: Boxes, testid: "nav-menu" },
@@ -87,6 +89,7 @@ export default function Shell() {
             {wsConnected ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
             <span className="font-mono-pos tracking-wider">{wsConnected ? "LIVE" : "OFFLINE"}</span>
           </div>
+          <PrinterChip />
           <button onClick={toggleMute} className="h-6 w-6 rounded hover:bg-slate-800 flex items-center justify-center text-slate-400"
                   data-testid="header-mute-toggle" title={muted ? "Unmute alerts" : "Mute alerts"}>
             {muted ? <VolumeX className="h-3.5 w-3.5" /> : <Volume2 className="h-3.5 w-3.5" />}

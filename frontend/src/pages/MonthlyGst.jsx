@@ -7,7 +7,8 @@ import { ChevronLeft, ChevronRight, Download, FileSpreadsheet, Landmark, Info } 
 
 export const ReportTabs = () => (
   <div className="flex gap-1 mt-2">
-    {[["/reports", "Daily", "report-tab-daily"], ["/reports/monthly", "Monthly GST", "report-tab-monthly"]].map(([to, label, tid]) => (
+    {[["/reports", "Daily", "report-tab-daily"], ["/reports/monthly", "Monthly GST", "report-tab-monthly"],
+      ["/reports/reconciliation", "Swiggy/Zomato Recon", "report-tab-recon"]].map(([to, label, tid]) => (
       <NavLink key={to} to={to} end data-testid={tid}
         className={({ isActive }) => `px-3 h-7 rounded text-[11px] font-semibold uppercase tracking-wider flex items-center transition-colors ${isActive
           ? "bg-teal-500/15 text-teal-300 border border-teal-500/40" : "text-slate-400 hover:text-slate-200 border border-slate-800"}`}>

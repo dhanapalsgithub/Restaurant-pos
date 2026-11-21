@@ -8,10 +8,11 @@ import { useAuth } from "@/lib/auth";
 import { toast } from "sonner";
 import { Banknote, CreditCard, QrCode, CheckCircle2, Printer, Split, ArrowLeft } from "lucide-react";
 import ReceiptPrint from "./ReceiptPrint";
+import { printOrder } from "@/lib/printer";
 import SplitSetup from "./SplitSetup";
 import SplitShares from "./SplitShares";
 
-export default function PaymentModal({ order, open, onClose, onPaid }) {
+export default function PaymentModal({ order, open, onClose, onPaid, autoUpi = false, autoFinish = false }) {
   const { subscribe, store } = useAuth();
   const [ord, setOrd] = useState(order);
   const [mode, setMode] = useState("UPI");
@@ -44,9 +45,17 @@ export default function PaymentModal({ order, open, onClose, onPaid }) {
   React.useEffect(() => {
     if (!open || !order) return;
     setOrd(order); setPaidOrder(null); setShare(null); setSplitSetup(false); resetPay(order.total);
+    setMode("UPI");
     refresh();
+    if (autoUpi) startUpi();
     return stopPoll;
   }, [open, order]);
+
+  React.useEffect(() => {
+    if (!autoFinish || status !== "paid") return;
+    const t = setTimeout(() => { onPaid?.(paidOrder || ord); onClose(); }, 1200);
+    return () => clearTimeout(t);
+  }, [status, autoFinish]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -107,9 +116,10 @@ export default function PaymentModal({ order, open, onClose, onPaid }) {
     catch (e) { fail(e); }
   };
 
-  const printAndClose = () => {
-    window.print();
-    setTimeout(() => { onPaid?.(paidOrder || order); onClose(); }, 400);
+  const printAndClose = async () => {
+    const how = await printOrder(paidOrder || ord, store);
+    if (how !== "dialog") toast.success("Sent to printer");
+    onPaid?.(paidOrder || order); onClose();
   };
 
   if (!order || !ord) return null;

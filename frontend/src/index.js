@@ -17,6 +17,14 @@ import Settings from "@/pages/Settings";
 import TablesFloor from "@/pages/TablesFloor";
 import Reports from "@/pages/Reports";
 import MonthlyGst from "@/pages/MonthlyGst";
+import QuickPos from "@/pages/QuickPos";
+import Reconciliation from "@/pages/Reconciliation";
+
+function HomeRedirect() {
+  const { store } = useAuth();
+  const quick = store?.business_type && store.business_type !== "Restaurant";
+  return <Navigate to={quick ? "/quick" : "/pos"} replace />;
+}
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false } },
@@ -34,7 +42,9 @@ function AppRoutes() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/" element={<RequireAuth><Shell /></RequireAuth>}>
-        <Route index element={<Navigate to="/pos" replace />} />
+        <Route index element={<HomeRedirect />} />
+        <Route path="quick" element={<QuickPos />} />
+        <Route path="reports/reconciliation" element={<Reconciliation />} />
         <Route path="dashboard" element={<Dashboard />} />
         <Route path="pos" element={<PosBilling />} />
         <Route path="online" element={<OnlineOrders />} />

@@ -20,7 +20,7 @@ export default function Login() {
     try {
       await login(username, password);
       toast.success("Login successful");
-      nav("/pos", { replace: true });
+      nav("/", { replace: true });
     } catch (err) {
       toast.error(err?.response?.data?.detail || "Login failed");
     } finally {

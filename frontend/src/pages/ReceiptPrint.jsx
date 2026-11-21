@@ -1,9 +1,11 @@
 import React from "react";
+import { getPrinterSettings } from "@/lib/printer";
 
-export default function ReceiptPrint({ order, store }) {
+export default function ReceiptPrint({ order, store, showKot }) {
   if (!order) return null;
+  const { width, kot } = getPrinterSettings();
   return (
-    <div className="thermal-receipt" data-testid="thermal-receipt-print">
+    <div className="thermal-receipt" style={{ width: `${width}mm`, fontSize: width === 58 ? 10 : 12 }} data-testid="thermal-receipt-print">
       <div className="center">
         <div style={{ fontWeight: 800, fontSize: 14 }}>{store?.store_name || "RESTAURANT"}</div>
         <div>{store?.address}</div>
@@ -19,9 +21,12 @@ export default function ReceiptPrint({ order, store }) {
       <hr />
       <div style={{ fontWeight: 700 }}>Item                  Qty  Amt</div>
       {order.items.map((i, idx) => (
-        <div key={idx} className="row">
-          <span>{i.name.slice(0, 18).padEnd(18)} x{i.qty}</span>
-          <span>₹{(i.price * i.qty).toFixed(2)}</span>
+        <div key={idx}>
+          <div className="row">
+            <span>{i.name.slice(0, width === 58 ? 14 : 18).padEnd(width === 58 ? 14 : 18)} x{i.qty}</span>
+            <span>₹{(i.price * i.qty).toFixed(2)}</span>
+          </div>
+          {i.notes && <div style={{ paddingLeft: 8, fontSize: "0.9em" }}>{i.notes}</div>}
         </div>
       ))}
       <hr />
@@ -39,6 +44,7 @@ export default function ReceiptPrint({ order, store }) {
       {order.payment_ref && <div className="row"><span>Ref</span><span>{order.payment_ref}</span></div>}
       <hr />
       <div className="center">** Thank you · Visit again **</div>
+      {(showKot ?? kot) && <>
       <div className="center" style={{ marginTop: 6 }}>-- KITCHEN ORDER TICKET --</div>
       <div className="row"><span>KOT #</span><span>{order.order_number}</span></div>
       <div className="row"><span>Time</span><span>{new Date().toLocaleTimeString()}</span></div>
@@ -48,6 +54,7 @@ export default function ReceiptPrint({ order, store }) {
       ))}
       <hr />
       <div className="center">-- END --</div>
+      </>}
     </div>
   );
 }

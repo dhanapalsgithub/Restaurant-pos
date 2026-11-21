@@ -5,7 +5,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
-import { Store as StoreIcon, Key, Link2 } from "lucide-react";
+import { Store as StoreIcon, Key, Link2, Percent, Printer, Coffee } from "lucide-react";
+import AggregatorSettings from "./AggregatorSettings";
+import PrinterSettings from "./PrinterSettings";
+
+const BUSINESS = ["Restaurant", "Tea Shop", "Juice Stall", "Bakery"];
 
 const Section = ({ icon: Icon, title, children }) => (
   <div className="bg-slate-900 border border-slate-800 rounded-lg p-5 mb-4">
@@ -57,6 +61,25 @@ export default function Settings() {
             <Field label="UPI VPA" name="upi_vpa" data={data} setData={setData} testid="set-upi-vpa" placeholder="merchant@upi" />
           </div>
           <Field label="Address" name="address" data={data} setData={setData} testid="set-address" />
+        </Section>
+
+        <Section icon={Coffee} title="Business type">
+          <div className="flex gap-2">
+            {BUSINESS.map((b) => (
+              <button key={b} onClick={() => setData({ ...data, business_type: b })} data-testid={`set-business-${b.replace(/\s+/g, "-").toLowerCase()}`}
+                className={`flex-1 h-11 rounded-md border-2 text-sm font-semibold transition-colors ${(data.business_type || "Restaurant") === b ? "border-teal-400 bg-teal-500/10 text-teal-300" : "border-slate-800 text-slate-400 hover:border-slate-600"}`}>{b}</button>
+            ))}
+          </div>
+          <div className="text-xs text-slate-500">Tea shops, juice stalls and bakeries open on the Quick Counter screen after login.</div>
+        </Section>
+
+        <Section icon={Percent} title="Aggregator commission settings">
+          <AggregatorSettings value={data.aggregator_settings} onChange={(v) => setData({ ...data, aggregator_settings: v })} />
+          <div className="text-xs text-slate-500">Used for new Swiggy/Zomato orders. Each order can still be adjusted from Online Orders.</div>
+        </Section>
+
+        <Section icon={Printer} title="Receipt printer (this device)">
+          <PrinterSettings />
         </Section>
 
         <Section icon={Link2} title="UrbanPiper">

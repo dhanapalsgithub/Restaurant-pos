@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 import { Flame, Timer, CheckCircle2, Package, Truck } from "lucide-react";
+import AggregatorPanel from "./AggregatorPanel";
 
 const CHANNEL_STYLES = {
   Swiggy: "bg-orange-500/10 text-orange-400 border-orange-500/40",
@@ -114,6 +115,7 @@ export default function OnlineOrders() {
                     <span className="text-[10px] uppercase tracking-widest text-slate-500 font-semibold">Paid Online</span>
                     <span className="font-mono-pos text-xl font-extrabold text-emerald-400">₹{o.total.toFixed(2)}</span>
                   </div>
+                  <AggregatorPanel order={o} onSaved={load} />
                   <div className="flex gap-2 pt-1">
                     {nextStatus && (
                       <Button size="sm" onClick={() => update(o.id, nextStatus)} data-testid={`online-advance-${o.id}`}

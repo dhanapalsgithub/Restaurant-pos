@@ -9,6 +9,7 @@ import { toast } from "sonner";
 import PaymentModal from "./PaymentModal";
 import HeldOrdersDialog from "./HeldOrdersDialog";
 import ReceiptPrint from "./ReceiptPrint";
+import { printOrder } from "@/lib/printer";
 
 
 export default function PosBilling() {
@@ -72,9 +73,10 @@ export default function PosBilling() {
     toast(`Recalled ${h.table_no ? "table " + h.table_no : "held order"}`);
   };
 
-  const printLast = () => {
+  const printLast = async () => {
     if (!lastReceipt) return toast.error("No receipt to reprint");
-    setTimeout(() => window.print(), 50);
+    const how = await printOrder(lastReceipt, store);
+    if (how !== "dialog") toast.success("Reprinted");
   };
 
   const filtered = useMemo(() => {
