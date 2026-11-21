@@ -136,9 +136,9 @@ class MenuItemIn(BaseModel):
 class OrderLine(BaseModel):
     item_id: str
     name: str
-    qty: int
-    price: float
-    tax_rate: float = 5.0
+    qty: int = Field(ge=1, le=10000)
+    price: float = Field(ge=0)
+    tax_rate: float = Field(default=5.0, ge=0, le=100)
     notes: str = ""
 
 
@@ -1424,7 +1424,7 @@ async def update_category(cid: str, data: CategoryIn, current=Depends(get_curren
 class PayoutIn(BaseModel):
     date: str
     platform: Literal["Swiggy", "Zomato"]
-    amount: float
+    amount: float = Field(gt=0)
     order_ref: str = ""
     reference: str = ""
 
@@ -1483,10 +1483,12 @@ async def _build_recon(store: Dict[str, Any], start: str, end: str, tz_offset: i
     orders = [_with_agg(o, store) for o in orders]
     payouts = await db.payouts.find({"store_id": store["id"], "date": {"$gte": _check_date(start), "$lte": _check_date(end)}},
                                     {"_id": 0}).sort("date", 1).to_list(20000)
+    # Order-level matching uses payouts by reference regardless of settlement date (payouts arrive T+3..T+7)
+    refs = [r for o in orders for r in (o.get("platform_order_id"), o["order_number"]) if r]
+    ref_payouts = await db.payouts.find({"store_id": store["id"], "order_ref": {"$in": refs}}, {"_id": 0}).to_list(20000)
     by_ref: Dict[str, float] = {}
-    for p in payouts:
-        if p["order_ref"]:
-            by_ref[p["order_ref"]] = by_ref.get(p["order_ref"], 0) + p["amount"]
+    for p in ref_payouts:
+        by_ref[p["order_ref"]] = by_ref.get(p["order_ref"], 0) + p["amount"]
     keys = ("gross_order_amount", "commission_amount", "gst_on_commission", "discount_borne_by_restaurant",
             "tds_tcs_deduction", "net_receivable_amount")
     plats = {p: {"platform": p, "orders": 0, **{k: 0.0 for k in keys}, "actual_received": 0.0} for p in AGG_PLATFORMS}

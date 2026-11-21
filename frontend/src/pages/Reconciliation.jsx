@@ -33,7 +33,7 @@ export function parsePayoutCsv(text) {
     const plat = (c[ci.platform] || "").toLowerCase();
     const platform = plat.startsWith("swig") ? "Swiggy" : plat.startsWith("zom") ? "Zomato" : null;
     const amount = Number(String(c[ci.amount] || "").replace(/[₹,\s]/g, ""));
-    if (!platform || !Number.isFinite(amount)) throw new Error(`Row ${i + 2}: check platform and amount`);
+    if (!platform || !(amount > 0)) throw new Error(`Row ${i + 2}: check platform and amount`);
     return { date: normDate(c[ci.date]), platform, amount, order_ref: ci.ref >= 0 ? c[ci.ref] || "" : "", reference: ci.utr >= 0 ? c[ci.utr] || "" : "" };
   });
 }

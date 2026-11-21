@@ -1,0 +1,57 @@
+{
+  "summary": "Tested the aggregator commission/payout reconciliation module and the tea shop / quick counter module, backend and frontend, plus a POS regression. Backend: 20 of 22 new pytest cases pass (/app/backend/tests/test_iter6_aggregator_quick.py). The full suite is 88/90; all 68 earlier tests still pass. The 2 failures are input-validation gaps: a negative line qty raises tracked stock, and a negative payout amount is accepted. Frontend: every requested flow works in the UI. Quick Counter: category rail, big cards, x2/3/5/10 multipliers, modifier picker (Strong +2 gives Rs 17 and 'Strong, Less' shows on the line), qty pad, F2 cash pays in one tap (cart clears, today strip and stock badge update, one auto-print), F3/UPI (QR shows, demo auto-confirms in about 13s, modal closes and cart clears, one print), closing the UPI modal cancels the order and restores stock (the demo auto-pay does not later pay the cancelled order), quick-pay-more (modal without auto QR, cash in modal, auto-close). Sold-out Samosa is greyed out and low-stock-badge shows. Settings: business type Tea Shop saves and re-login lands on /quick; aggregator inputs save; printer mode/width/autoprint/KOT; Test print uses the dialog fallback; Connect in headless shows the 'Bluetooth printing needs Chrome or Edge' toast (navigator.bluetooth is undefined, so requestDevice could not be checked). Menu & Stock: quick pack (already added toast), category dialog (icon/colour saved), item edit (track stock, qty 4, low 5, options text parsed; menu-qty shows '4 · LOW'; bad options text shows an error toast). Online Orders: agg panel and net, edit dialog with live preview, save persists, over-deduction gives a 400 toast. Reconciliation: cards show Shortfall/Matched with -Rs X, record payout gives Short, a CSV with DD/MM/YYYY and lowercase 'zomato' gives Matched, bad platform and bad date rows show error toasts, template and export download, payout delete works, shadcn calendar picker. Regression: POS cash checkout with INV number, F8 reprint (dialog fallback), hold and recall, equal split paid in 2 shares.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/orders", "issue": "OrderLine.qty has no lower bound. qty=-5 on a tracked item returns 200 and INCREASES stock (Egg Puff 50 -> 55). It also makes negative subtotals and totals possible. Add Field(ge=1) to OrderLine.qty and a non-negative price.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/payouts, /api/payouts/bulk", "issue": "amount accepts negative values and 0. The UI blocks <=0 for manual entry, but a CSV row with an empty amount parses as 0 and is imported. Add Field(gt=0), or reject empty amounts in parsePayoutCsv."},
+      {"endpoint": "POST /api/orders (_check_stock + _adjust_stock)", "issue": "The stock check and the decrement are not atomic. Concurrent orders can oversell, and stock is then clamped to 0. The probe did not reproduce it (6 parallel orders, stock 3, qty 2 each: only 1 succeeded), but it is a check-then-act race. Use a conditional find_one_and_update with stock_qty >= qty."},
+      {"endpoint": "PUT /api/stores/me aggregator_settings", "issue": "A partial payload resets the omitted platform to defaults. Sending only Swiggy turned Zomato 30% into 20%. The frontend always sends both, so the risk is low, but API/webhook clients would lose settings. Merge with the stored settings."},
+      {"endpoint": "GET /api/reports/reconciliation", "issue": "Order-level matching only uses payouts whose settlement date falls inside the same range as the order date. Real Swiggy/Zomato settlements arrive T+3 to T+7, so orders at the end of a range show Unsettled. Their payouts, recorded in the next range, then show as unmatched Excess in the platform totals. Consider matching order_ref payouts regardless of payout date, or adding a settlement lag window."},
+      {"endpoint": "PUT /api/menu/{id}", "issue": "Returns 200 {ok:true} for an unknown id (no 404)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "AggregatorPanel edit preview", "issue": "A negative net preview is shown as '₹-351.95' instead of '-₹351.95', which is inconsistent with the rs() format on Reconciliation.", "selector": "[data-testid='agg-edit-preview']", "priority": "LOW"},
+      {"component": "POS Billing (restaurant screen)", "issue": "Tapping an item that has modifiers (Masala Tea) adds it straight to the cart with no variant picker or notes. Variants only work on the Quick Counter. This may be intended, but it is a gap if a restaurant also sells tea.", "selector": "[data-testid^='pos-item-']", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Reconciliation cards", "issues": ["A platform with only Unsettled orders (nothing received yet) shows a red 'SHORTFALL -₹136.08'. Consider 'Awaiting settlement' when actual_received is 0."]},
+      {"screen": "Header printer chip", "issues": ["In bluetooth/serial mode with no device connected, the chip shows only 'Connect printer' without mode and width. That is acceptable, but the spec said it shows mode and width."]},
+      {"screen": "Menu & Stock", "issues": ["The IN STOCK toggle can turn a tracked item with stock 0 back to available. Orders then fail with 'Only 0 X left in stock'."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter6_aggregator_quick.py",
+    "/app/backend/tests/stock_race_probe.py",
+    "/app/backend/tests/legacy_order_probe.py"
+  ],
+  "action_items": [
+    "Add qty >= 1 (and price >= 0) validation to OrderLine. Negative qty currently increases tracked stock.",
+    "Validate payout amount > 0 (backend), and reject empty amounts in parsePayoutCsv.",
+    "Make the stock check and decrement atomic (conditional $inc with a stock_qty >= qty filter).",
+    "Merge partial aggregator_settings with the stored values instead of resetting the omitted platform.",
+    "Consider matching payouts by order_ref regardless of the payout date range (settlement lag).",
+    "Minor: format the negative preview as -₹X in AggregatorPanel; return 404 from PUT /api/menu/{id} for an unknown id."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 1678 lines; split it into routers (aggregator/recon, quick/stock, payments, reports).",
+    "update_status filters on order_status != Cancelled for every status change. A cancelled order can never be re-opened (fine), but the call returns ok:true even when nothing changed.",
+    "Reconciliation.jsx del() has no try/catch or error toast.",
+    "ItemEditDialog: an empty price field saves price 0 (Number('') = 0 passes the >= 0 check)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter6_aggregator_quick.py",
+    "/app/backend/tests/stock_race_probe.py",
+    "/app/backend/tests/legacy_order_probe.py"
+  ],
+  "success_rate": {"backend": "91% (20/22 new; 88/90 overall)", "frontend": "100% of requested flows (minor UX notes only)"},
+  "seed_data_creation": "Created throwaway TEST_ stores (TEST_Iter6, TEST_Iter6R, TEST_Probe, TEST_Legacy, TEST_UI Recon, TEST_Reg; usernames test_*), with orders and payouts in them. There is no store-delete endpoint, so they remain. The legacy order inserted directly into Mongo was deleted. Changes to the demo store: Quick Counter UI testing created real test sales ORD00075-ORD00082 (cash/UPI Paid; 2 Cancelled from the UPI-close tests). They cannot be deleted through the API and they affect today's demo report. Demo stock for Cream Bun, Plum Cake Slice, Rusk Pack and Osmania Biscuit was reset to 50 (its prior value). A TEST_Chai Item and a TEST_UI Cat category were created and then deleted by id. business_type was restored to 'Restaurant' (it was previously unset) and aggregator settings were restored (Swiggy 22% subtotal, Zomato 25% gross, TDS 0). Samosa was left at 0 (sold out) as found.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "test_credentials": "demo / demo123 (from /app/memory/test_credentials.md)",
+  "context_for_next_testing_agent": "Run: REACT_APP_BACKEND_URL=<url> pytest /app/backend/tests -n 0. The 2 expected failures in test_iter6 (negative payout amount, negative order qty) should pass once fixed. Playwright notes: add_init_script runs only on later navigations, so stub window.print with page.evaluate('() => {...}') after login; do NOT evaluate a bare assignment expression, because Playwright calls a returned function and records a fake print. Modifier chip testids are lowercase slugs (modifier-0-strong, modifier-1-no-sugar). The agg edit dialog testids are agg-edit-discount and agg-edit-tds, not the full field names. Recon is at /reports/reconciliation via report-tab-recon. Use a freshly registered TEST store for online/recon UI tests so the demo data stays clean."
+}
