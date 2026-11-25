@@ -31,6 +31,9 @@ export default function PosBilling() {
   const searchRef = useRef(null);
   const { store } = useAuth();
 
+  // New state for customer cash tendered / balance calculation
+  const [customerPaid, setCustomerPaid] = useState("");
+
   const load = async () => {
     const [c, m, t, h] = await Promise.all([api.get("/categories"), api.get("/menu"), api.get("/tables"), api.get("/held-orders")]);
     setCategories(c.data); setItems(m.data); setTables(t.data); setHeldCount(h.data.length);
@@ -63,7 +66,7 @@ export default function PosBilling() {
       await api.post("/held-orders", { id: heldId, order_type: orderType, table_no: table, items: lines() });
     } catch (err) { return toast.error(err?.response?.data?.detail || "Could not hold order"); }
     toast.success(table ? `Bill parked on table ${table}` : "Order held");
-    setCart([]); setTableNo(""); setHeldId(null);
+    setCart([]); setTableNo(""); setHeldId(null); setCustomerPaid("");
     refreshHeld(); api.get("/tables").then(({ data }) => setTables(data));
   };
 
@@ -105,6 +108,10 @@ export default function PosBilling() {
   const rates = [...new Set(cart.map((i) => i.tax_rate))];
   const gstLabel = rates.length === 1 ? `GST (${rates[0]}%)` : "GST";
 
+  // Balance calculations
+  const paidAmountNum = parseFloat(customerPaid) || 0;
+  const balanceAmount = +(paidAmountNum - total).toFixed(2);
+
   const checkout = async () => {
     if (cart.length === 0) return toast.error("Cart is empty");
     if (currentOrder?.payment_status === "Pending") return setPayOpen(true);
@@ -117,7 +124,7 @@ export default function PosBilling() {
   useEffect(() => { setCurrentOrder(null); }, [cart, orderType, tableNo]);
 
   const onPaid = (o) => {
-    setCart([]); setTableNo(""); setCurrentOrder(null); setHeldId(null);
+    setCart([]); setTableNo(""); setCurrentOrder(null); setHeldId(null); setCustomerPaid("");
     if (o) { setLastReceipt(o); localStorage.setItem("pos_last_receipt", JSON.stringify(o)); }
   };
 
@@ -259,6 +266,28 @@ export default function PosBilling() {
             <span className="text-[11px] uppercase tracking-widest text-slate-400 font-semibold">Total</span>
             <span className="font-mono-pos text-3xl font-extrabold text-teal-400" data-testid="cart-total">₹{total.toFixed(2)}</span>
           </div>
+
+          {/* Customer Paid and Balance Section */}
+          {/* Customer Paid and Balance Section */}
+          <div className="pt-2 border-t border-slate-800/60 space-y-1.5">
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-400 whitespace-nowrap">வாடிக்கையாளர் கொடுத்தது (Paid):</span>
+              <Input
+                type="number"
+                value={customerPaid}
+                onChange={(e) => setCustomerPaid(e.target.value)}
+                placeholder="₹ 0.00"
+                className="h-8 bg-slate-950 border-slate-800 text-slate-100 font-mono-pos text-right text-sm"
+              />
+            </div>
+            {customerPaid !== "" && (
+              <div className={`flex justify-between text-xs font-semibold px-1 py-1 rounded ${balanceAmount >= 0 ? "bg-emerald-500/10 text-emerald-400" : "bg-rose-500/10 text-rose-400"}`}>
+                <span>{balanceAmount >= 0 ? "மீதித் திருப்பிக் கொடுக்க வேண்டியது (Change):" : "பணம் குறைவாக உள்ளது (Short):"}</span>
+                <span className="font-mono-pos">₹{Math.abs(balanceAmount).toFixed(2)}</span>
+              </div>
+            )}
+          </div>
+
           <div className="flex gap-2 mt-2">
             <Button onClick={holdOrder} variant="outline" data-testid="pos-hold-btn"
               className="h-12 px-4 border-amber-500/40 bg-amber-500/5 text-amber-300 hover:bg-amber-500/15 hover:text-amber-200 font-bold tracking-wide">

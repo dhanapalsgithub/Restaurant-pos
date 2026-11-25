@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import { useOutletContext } from "react-router-dom";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -21,11 +21,15 @@ export default function OnlineOrders() {
   const [orders, setOrders] = useState([]);
   const [autoAccept, setAutoAccept] = useState(() => localStorage.getItem("auto_accept") === "1");
 
-  const load = async () => {
+  const load = useCallback(async () => {
     const { data } = await api.get("/orders", { params: { limit: 50 } });
     setOrders(data.filter((o) => o.channel === "Swiggy" || o.channel === "Zomato"));
-  };
-  useEffect(() => { load(); outlet?.clearOnlineCount?.(); }, []);
+  }, []);
+
+  useEffect(() => { 
+    load(); 
+    outlet?.clearOnlineCount?.(); 
+  }, [load, outlet]);
 
   useEffect(() => subscribe((m) => {
     if (m.type === "online_order") {
@@ -35,7 +39,7 @@ export default function OnlineOrders() {
       }
     }
     if (m.type === "order_updated") load();
-  }), [subscribe, autoAccept]);
+  }), [subscribe, autoAccept, load]);
 
   const toggleAuto = (v) => { setAutoAccept(v); localStorage.setItem("auto_accept", v ? "1" : "0"); toast(`Auto-accept ${v ? "enabled" : "disabled"}`); };
   const update = async (id, s) => { await api.put(`/orders/${id}/status`, { order_status: s }); load(); };

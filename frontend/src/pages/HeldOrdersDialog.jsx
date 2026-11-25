@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
@@ -13,12 +13,15 @@ const ago = (iso) => {
 export default function HeldOrdersDialog({ open, onClose, onRecall, onChanged }) {
   const [list, setList] = useState([]);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     const { data } = await api.get("/held-orders");
     setList(data);
     onChanged?.(data.length);
-  };
-  useEffect(() => { if (open) load(); }, [open]);
+  }, [onChanged]);
+
+  useEffect(() => { 
+    if (open) load(); 
+  }, [open, load]);
 
   const discard = async (id) => {
     await api.delete(`/held-orders/${id}`);

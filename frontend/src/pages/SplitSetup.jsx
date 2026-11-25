@@ -41,7 +41,10 @@ export default function SplitSetup({ order, onCreated, onCancel }) {
 
   const units = useMemo(() => order.items.flatMap((ln, index) =>
     Array.from({ length: ln.qty }, (_, u) => ({ key: `${index}-${u}`, index, name: ln.name, price: ln.price, rate: ln.tax_rate ?? 5 }))), [order]);
-  const guestOf = (u) => Math.min(assign[u.key] ?? 0, n - 1);
+  
+  const guestOf = useMemo(() => {
+    return (u) => Math.min(assign[u.key] ?? 0, n - 1);
+  }, [assign, n]);
 
   const preview = useMemo(() => {
     if (mode === "equal") return equalSplit(order.total, n);
@@ -51,7 +54,7 @@ export default function SplitSetup({ order, onCreated, onCancel }) {
     const rounded = arr.map((a) => Math.round(a * 100) / 100);
     rounded[n - 1] = Math.round((order.total - rounded.slice(0, -1).reduce((s, a) => s + a, 0)) * 100) / 100;
     return rounded;
-  }, [mode, n, units, assign, order]);
+  }, [mode, n, units, guestOf, order]);
 
   const counts = Array.from({ length: n }, (_, g) => units.filter((u) => guestOf(u) === g).length);
   const emptyGuest = mode === "items" && counts.some((c) => c === 0);
